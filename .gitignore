@@ -1,0 +1,24 @@
+node_modules/
+dist/
+build/
+
+# secrets & runtime state
+vault.ravenne.json
+vault.secure.json
+vault-decoy.ravenne.json
+access.ravenne.json
+gate-attempts.log
+ui-errors.log
+ravenne-keystore-*.json
+machines.json
+
+# network config (proxy URL, requireProxy)
+net.ravenne.json
+
+# generated / intermediate
+*.zip
+ravenne-256.png
+_*.tmp
+tools/monero/wallets/
+tools/monero/*.zip
+src-tauri/target/
