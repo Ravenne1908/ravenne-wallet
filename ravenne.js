@@ -26,7 +26,7 @@ import { HDKey } from "@scure/bip32";
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
-const VERSION = "9.5.0";
+const VERSION = "9.6.0";
 process.title = "Ravenne Wallet";
 
 /* Network-layer privacy: route ALL outgoing HTTP (RPC, explorers, prices)
@@ -292,105 +292,86 @@ async function P(questions) {
 const confirm = async msg =>
   state.autoYes ? true : (await P({ type: "confirm", name: "v", message: msg, initial: false })).v;
 
-/* ─────────── Pretty UI v4 ─────────── */
-/* ── centrage : colonne de contenu au milieu du terminal ── */
+/* ─────────── UI ─────────── */
+const MARGIN = "  ";
 const stripA = s => s.replace(/\x1b\[[0-9;]*m/g, "");
 const termW = () => (TTY && process.stdout.columns) || 0;
-const padMargin = blockW => { const w = termW(); return (TTY && w > blockW + 2) ? Math.max(0, Math.floor((w - blockW) / 2)) : 0; };
-const shift = (lines, blockW) => { const p = " ".repeat(padMargin(blockW)); return lines.map(l => p + l); };
-const centerLine = s => {
-  const w = termW(), vis = stripA(s).length;
-  if (!(TTY && w > vis + 2)) return s;
-  return " ".repeat(Math.max(0, Math.floor((w - vis) / 2))) + s;
-};
-const WATERMARK = [
-  "██████╗░░█████╗░██╗░░░██╗███████╗███╗░░██╗███╗░░██╗░██████╗░███████╗",
-  "██╔══██╗██╔══██╗██║░░░██║██╔════╝████╗░██║████╗░██║██╔════╝░██╔════╝",
-  "██████╔╝███████║██║░░░██║█████╗░░██╔██╗██║██╔██╗██║██║░░██╗░█████╗░░",
-  "██╔══██╗██╔══██║██║░░░██║██╔══╝░░██║╚████║██║╚████║██║░░██║░██╔══╝░░",
-  "██║░░██║██║░░██║██████╔╝███████╗██║░╚███║██║░╚███║╚██████╔╝███████╗",
-  "╚═╝░░╚═╝╚═╝░░╚═╝╚═════╝░╚══════╝╚═╝░░╚══╝╚═╝░░╚══╝░╚═════╝░╚══════╝",
-];
+const centerLine = s => MARGIN + s;                 // left margin, consistent everywhere
+const shift = lines => lines.map(l => MARGIN + l);
+const hrule = (n = 60) => c.soft("─".repeat(n));
 
-function pillsLine() {
-  if (!state.payload) return "";
-  const s = settings();
-  const bcast = (s.privacy?.broadcast || "auto");
-  const mode = bcast === "rpc" ? "direct tx" : "private tx";
-  return [
-    tag("proxy", !!PROXY, PROXY ? "proxy" : "proxy"),
-    tag("vpn", s.vpnCheck !== false, "vpn"),
-    tag("jitter", !!s.privacy?.queryJitter, "jitter"),
-    tag("no-price", !s.prices, "no-price"),
-    tag(mode, bcast !== "rpc" && netKey() === "eth", mode),
-  ].join(c.soft("  ·  "));
-}
 function banner() {
   if (TTY) console.clear();
-  const p = state.payload ? V().active : null;
-  const w = termW();
   console.log("");
-  if (!TTY || w === 0 || w >= 82) {
-    for (const l of WATERMARK) console.log(c.accent(centerLine(l)));
-  } else {
-    console.log(centerLine(c.bold("RAVENNE") + c.soft("  private terminal wallet")));
+  console.log(MARGIN + c.bold("RAVENNE") + c.soft(`   v${VERSION}`));
+  console.log(MARGIN + c.soft("local-first crypto wallet"));
+  if (state.payload) {
+    console.log(MARGIN + c.soft("wallet ") + c.bold(V().active) + c.soft("   ·   ") + c.bold(N().label));
   }
-  console.log("");
-  console.log(centerLine(c.bold(c.wht("RAVENNE")) + c.soft(" WALLET") + c.soft(`  v${VERSION}`)));
-  console.log(centerLine(c.soft("non-custodial · local-only · zero telemetry")));
-  if (p) {
-    console.log(centerLine(
-      c.soft("wallet ") + c.bold(p) +
-      c.soft("  ·  chain ") + c.bold(N().label) +
-      c.soft(`  ·  ${W().length} EVM + ${BW().length} BTC + ${XW().length} XMR`)));
-    console.log(centerLine(pillsLine()));
-  }
-  console.log(centerLine(rule(64)));
+  console.log(MARGIN + hrule(Math.min(60, Math.max(28, termW() - 4))));
 }
+
 function header(title) {
   console.log("");
-  console.log(centerLine(`${c.bold(title)}  ${c.soft("─".repeat(Math.max(6, 46 - title.length)))}`));
+  console.log(MARGIN + c.bold(title));
+  console.log(MARGIN + hrule(Math.min(60, Math.max(24, title.length + 6))));
 }
+
+/* Clean label/value panel: no borders, aligned columns. */
+function panel(title, rows) {
+  const lw = Math.max(4, ...rows.map(r => String(r[0]).length));
+  console.log("");
+  console.log(MARGIN + c.soft(title));
+  for (const [label, value, note] of rows) {
+    console.log(MARGIN + c.soft(String(label).padEnd(lw)) + "   " + value +
+      (note ? "   " + c.soft(String(note)) : ""));
+  }
+}
+
 function box(title, lines) {
-  const inner = Math.max(title.length + 4, ...lines.map(l => stripA(l).length), 20) + 3;
-  const top = c.accent("╭─") + " " + c.accent(c.bold(title)) + " " +
-              c.accent("─".repeat(Math.max(0, inner - title.length - 4)) + "╮");
-  const rendered = [
-    top,
-    ...lines.map(l => c.accent("│") + " " + l + " ".repeat(Math.max(0, inner - 1 - stripA(l).length)) + c.accent("│")),
-    c.accent(`╰${"─".repeat(inner)}╯`),
-  ];
-  for (const l of shift(rendered, inner + 2)) console.log(l);
+  const W = Math.max(title.length + 4, ...lines.map(l => stripA(l).length + 2), 24);
+  const top = "┌─ " + c.bold(title) + " " +
+              c.soft("─".repeat(Math.max(0, W - title.length - 3))) + "┐";
+  console.log(MARGIN + top);
+  for (const l of lines) {
+    const pad = " ".repeat(Math.max(0, W - 1 - stripA(l).length));
+    console.log(MARGIN + c.soft("│") + " " + l + pad + c.soft("│"));
+  }
+  console.log(MARGIN + "└" + c.soft("─".repeat(W)) + "┘");
 }
+
+/* Borderless table: header, rule, rows. */
 function table(headers, rows, opts = {}) {
   const aligns = opts.align || [];
   const widths = headers.map((h, i) => Math.max(stripA(String(h)).length,
     ...rows.map(r => stripA(String(r[i] ?? "")).length)));
-  const row = cells => "  " + cells.map((cell, i) => {
+  const line = cells => cells.map((cell, i) => {
     const s = String(cell ?? "");
     const pad = " ".repeat(Math.max(0, widths[i] - stripA(s).length));
     return aligns[i] === "r" ? pad + s : s + pad;
   }).join("  ");
-  const sep = ch => c.soft("  " + widths.map(w => "─".repeat(w)).join(ch));
-  if (!rows.length) { console.log(c.soft("  (nothing to show)")); return; }
-  const blockW = widths.reduce((a, b) => a + b, 0) + (widths.length - 1) * 2 + 2;
-  const rendered = [sep("┬"), c.bold(c.wht(row(headers))), sep("┼"), ...rows.map(r => row(r)), sep("┴")];
-  for (const l of shift(rendered, blockW)) console.log(l);
+  if (!rows.length) { console.log(MARGIN + c.soft("no entries")); return; }
+  console.log(MARGIN + c.bold(line(headers)));
+  console.log(MARGIN + c.soft(widths.map(w => "─".repeat(w)).join("  ")));
+  for (const r of rows) console.log(MARGIN + line(r));
 }
+
 function statusLine() {
   const s = settings();
-  const bits = [
-    c.bold(N().label),
-    `${c.soft("wallets")} ${c.bold(W().length)}${BW().length ? c.soft(" + ") + c.bold(BW().length + " BTC") : ""}`,
-    PROXY ? c.ok("proxy on") : c.warn("proxy off"),
+  const tags = [
+    PROXY ? c.ok("proxy on") : c.warn("no proxy"),
+    s.vpnCheck !== false ? c.ok("vpn on") : c.soft("vpn off"),
+    (s.privacy?.broadcast || "auto") === "rpc" ? c.soft("direct tx") : c.ok("private tx"),
     s.privacy?.queryJitter ? c.ok("jitter on") : c.soft("jitter off"),
     c.soft(`lock ${s.autolockMin || "off"}m`),
   ];
-  console.log(centerLine("  " + bits.join(c.soft("  ·  "))));
-  console.log(centerLine(rule(56)) + "\n");
+  console.log(MARGIN + c.soft("wallet ") + c.bold(V().active) + c.soft("   ·   ") + c.bold(N().label));
+  console.log(MARGIN + tags.join(c.soft("   ·   ")));
+  console.log("");
 }
+
 function footer() {
-  console.log(centerLine(c.soft("up/down move  ·  enter select  ·  esc cancel")));
+  console.log(MARGIN + c.soft("up/down move   ·   enter select   ·   esc cancel"));
   console.log("");
 }
 async function spin(label, fn) {
@@ -1333,11 +1314,13 @@ async function cmdBalance() {
     header(`BALANCES — ${NET[k].label} (${NET[k].sym})`);
     if (rows.length) table(["#", "LABEL", "BALANCE", "VALUE"], rows, { align: [null, null, "r", "r"] });
     else console.log(c.dim("  (no funded wallet on this chain)"));
-    console.log(`\n   ${c.bold("TOTAL")}  ${c.ok(fmtAmt(total))} ${NET[k].sym}${v != null ? c.dim(`   ≈ ${usd(v)} / ${eur(v * 0.92)}`) : ""}`);
+    console.log("");
+    console.log(MARGIN + c.soft("total".padEnd(12)) + c.ok(`${fmtAmt(total)} ${NET[k].sym}`) + (v != null ? c.soft(`   ≈ ${usd(v)} / ${eur(v * 0.92)}`) : ""));
   }
   if (state.flags.all) {
     if (BW().length) { grandUsd += await btcTotalLine(prices); }
-    console.log(`\n${c.vio("Σ ALL CHAINS")}: ${grandUsd ? c.bold(`≈ ${usd(grandUsd)}`) : c.dim("enable prices for a fiat total")}`);
+    console.log("");
+    console.log(MARGIN + c.soft("all chains".padEnd(12)) + (grandUsd ? c.bold(`≈ ${usd(grandUsd)}`) : c.soft("enable prices for a fiat total")));
   }
 }
 async function btcTotalLine(prices) {
@@ -1348,7 +1331,8 @@ async function btcTotalLine(prices) {
   table(["#", "LABEL", "ADDRESS", "BALANCE (BTC)", "VALUE"],
     BW().map((w, i) => [`#${i}`, w.label, w.address, bals[i] == null ? "?" : fmtBtc(bals[i]), bals[i] != null && v != null ? `≈ ${usd(btcValue(bals[i], prices))}` : ""]),
     { align: [null, null, null, "r", "r"] });
-  console.log(`\n   ${c.bold("TOTAL")}  ${c.ok(fmtBtc(total))} ${BTC.sym}${v != null ? c.dim(`   ≈ ${usd(v)} / ${eur(v * 0.92)}`) : ""}`);
+  console.log("");
+  console.log(MARGIN + c.soft("total".padEnd(12)) + c.ok(`${fmtBtc(total)} ${BTC.sym}`) + (v != null ? c.soft(`   ≈ ${usd(v)} / ${eur(v * 0.92)}`) : ""));
   return v || 0;
 }
 async function cmdDashboard() {
@@ -1934,19 +1918,19 @@ async function cmdRpc(args) {
 async function cmdSettings(args) {
   const s = settings();
   if (!args.length) {
-    box("SETTINGS", [
-      `privacy     rotation RPC ${s.privacy?.rpcRotation !== false ? "ON" : "OFF"} · jitter ${s.privacy?.queryJitter ? "ON" : "OFF"}`,
-      `proxy       ${PROXY ? c.ok(PROXY) : "none"} · required ${netConfig()?.requireProxy ? c.ok("YES") : "no"}`,
-      `broadcast   ${((s.privacy?.broadcast) || "auto") === "rpc" ? "public RPC" : c.ok("private (ETH)")} · clearnet ${s.privacy?.allowClearnetSend ? c.warn("allowed") : c.ok("blocked")}`,
-      `btc api     ${s.btcApi ? c.ok(s.btcApi) : "Blockstream (public)"}`,
-      `vpn check   ${s.vpnCheck ? c.ok("ON  (no connection without an active VPN)") : "OFF"} · fail-closed ${s.vpnFailClosed !== false ? c.ok("YES") : "no"}`,
-      `prices      ${s.prices ? "ON  (fiat values via CoinGecko)" : "OFF (no price queries — better privacy)"}`,
-      `autolock    ${s.autolockMin} min of inactivity in the menu (0 = off)`,
-      `btc network ${s.btcTest ? "testnet" : "mainnet"}`,
-      `custom rpc  ${Object.keys(s.rpc).length} chain(s) · address book ${s.book.length} entries`,
+    panel("SETTINGS", [
+      ["rotation", `${s.privacy?.rpcRotation !== false ? "on" : "off"}`, `jitter ${s.privacy?.queryJitter ? "on" : "off"}`],
+      ["proxy", PROXY || "none", netConfig()?.requireProxy ? "required" : ""],
+      ["broadcast", ((s.privacy?.broadcast) || "auto") === "rpc" ? "public RPC" : "private (ETH)", s.privacy?.allowClearnetSend ? c.warn("clearnet allowed") : "clearnet blocked"],
+      ["btc api", s.btcApi || "Blockstream (public)"],
+      ["vpn", s.vpnCheck ? "on" : "off", s.vpnFailClosed !== false ? "fail-closed" : "fail-open"],
+      ["prices", s.prices ? "on (CoinGecko)" : "off"],
+      ["auto-lock", `${s.autolockMin} min`],
+      ["bitcoin", s.btcTest ? "testnet" : "mainnet"],
+      ["rpc / book", `${Object.keys(s.rpc).length} chains · ${s.book.length} entries`],
     ]);
-    console.log(c.soft("\n  settings vpncheck|failclosed|prices|autolock|meshvpn|sweepfee|rotation|jitter"));
-    console.log(c.soft("  settings broadcast auto|private|rpc · allowclearnet on|off · btcapi <url|reset> · proxy <url>"));
+    console.log(MARGIN + c.soft("settings vpncheck|failclosed|prices|autolock|meshvpn|sweepfee|rotation|jitter"));
+    console.log(MARGIN + c.soft("settings broadcast auto|private|rpc · allowclearnet on|off · btcapi <url|reset> · proxy <url>"));
     return;
   }
   if (args[0] === "broadcast") {
@@ -3128,37 +3112,34 @@ function renderDashboard(snap) {
   const totalEvm = snap.evm ? (snap.evm.main ?? 0n) + snap.evm.recv : null;
   const fiatEvm = snap.prices && totalEvm != null ? netValue(totalEvm, k, snap.prices) : null;
   const fiatBtc = snap.prices && snap.btc != null ? btcValue(snap.btc, snap.prices) : null;
-  const sumUsd = (fiatEvm || 0) + (fiatBtc || 0);
   const used = [...receivingEvm(), ...receivingBtc()].filter(w => w.usedAt).length;
-  const row = (l, v, x = "") => c.soft(l.padEnd(13)) + v + (x ? c.soft("   " + x) : "");
   const noMain = !mainEvm();
 
-  box("OVERVIEW", [
-    row("wallet", c.bold(V().active), `· ${N().label}`),
-    row("MAIN", noMain ? c.dim("—") : snap.evm?.main != null ? c.bold(`${fmtAmt(snap.evm.main)} ${sym}`) : c.err("offline")),
-    row("receiving", snap.evm ? `${fmtAmt(snap.evm.recv)} ${sym}` : c.dim("—"), "pending"),
-    row("total", totalEvm != null ? c.ok(`${fmtAmt(totalEvm)} ${sym}`) : c.dim("—"), fiatEvm != null ? `≈ ${usd(fiatEvm)}` : ""),
-    ...(BW().length ? [row("bitcoin", snap.btc != null ? c.ok(`${fmtBtc(snap.btc)} BTC`) : c.dim("—"), fiatBtc != null ? `≈ ${usd(fiatBtc)}` : "")] : []),
-    row("addresses", `${receivingEvm().length} EVM · ${receivingBtc().length} BTC`, used ? c.warn(`${used} already used`) : "all fresh"),
+  panel("BALANCE", [
+    ["main", noMain ? c.soft("not configured") : snap.evm?.main != null ? c.bold(`${fmtAmt(snap.evm.main)} ${sym}`) : c.warn("offline")],
+    ["receiving", snap.evm ? `${fmtAmt(snap.evm.recv)} ${sym}` : c.soft("—"), "pending"],
+    ["total", totalEvm != null ? c.bold(`${fmtAmt(totalEvm)} ${sym}`) : c.soft("—"), fiatEvm != null ? `≈ ${usd(fiatEvm)}` : ""],
+    ...(BW().length ? [["bitcoin", snap.btc != null ? `${fmtBtc(snap.btc)} BTC` : c.soft("—"), fiatBtc != null ? `≈ ${usd(fiatBtc)}` : ""]] : []),
+    ["addresses", `${receivingEvm().length} EVM · ${receivingBtc().length} BTC`, used ? c.warn(`${used} already used`) : "all fresh"],
   ]);
 
-  if (sumUsd > 0) console.log(centerLine(c.soft("total value  ") + c.bold(c.ok(usd(sumUsd)))));
+  panel("NETWORK", [
+    ["tunnel", PROXY ? c.ok("on") : c.warn("off"), PROXY ? "" : "sends blocked"],
+    ["vpn", settings().vpnCheck !== false ? c.ok("on") : c.soft("off")],
+    ["broadcast", (settings().privacy?.broadcast || "auto") === "rpc" ? c.soft("public RPC") : c.ok("private (ETH)")],
+    ["jitter", settings().privacy?.queryJitter ? c.ok("on") : c.soft("off")],
+  ]);
 
-  const net = [
-    PROXY ? c.ok("tunnel on") : c.warn("no tunnel"),
-    settings().vpnCheck !== false ? c.ok("vpn on") : c.soft("vpn off"),
-    (settings().privacy?.broadcast || "auto") === "rpc" ? c.soft("direct tx") : c.ok("private tx"),
-    settings().privacy?.queryJitter ? c.ok("jitter on") : c.soft("jitter off"),
-  ];
-  console.log(centerLine(net.join(c.soft("  ·  "))));
-  if (!PROXY) console.log(centerLine(c.warn("sends blocked without a tunnel — ravenne proxy <url>")));
-  if (noMain) console.log(centerLine(c.warn("no MAIN wallet — run the setup")));
+  if (noMain) console.log(MARGIN + c.warn("no MAIN wallet — run the setup"));
+  if (!PROXY) console.log(MARGIN + c.warn("no tunnel — sends are blocked (ravenne proxy <url>)"));
 
   const hist = mergedHistory().slice(0, 3);
   if (hist.length) {
-    console.log("");
-    box("RECENT ACTIVITY", hist.map(x =>
-      `${c.soft(x.t)}  ${x.dir.padEnd(4)}  ${short(x.from)} → ${short(x.to)}  ${x.amountFmt}`));
+    panel("RECENT ACTIVITY", hist.map(x => [
+      x.t,
+      `${x.dir.padEnd(4)}  ${short(x.from)} → ${short(x.to)}`,
+      x.amountFmt,
+    ]));
   }
 }
 
@@ -4375,8 +4356,9 @@ async function advancedMenu(fromHome = false) {
       await P({ type: "text", name: "_", message: c.dim("— Enter to continue —") });
       lastActive = Date.now();
       console.clear();
-      console.log(centerLine(c.bold(c.wht("RAVENNE")) + c.soft(`  ·  ${cat}`)));
-      console.log(centerLine(pillsLine()) + "\n");
+      console.log(MARGIN + c.bold("RAVENNE") + c.soft(`   ·   ${cat}`));
+      console.log(MARGIN + hrule(40));
+      console.log("");
     }
   }
 }

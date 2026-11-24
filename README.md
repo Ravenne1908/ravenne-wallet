@@ -6,6 +6,8 @@ sans télémétrie, sans activation.
 
 > Open source (MIT). Aucun webhook, aucune vérification, aucun appel à la
 > maison. Tout tourne sur ta machine, chiffré par ton mot de passe maître.
+> Interface terminal repensée : panneaux alignés, tableau de bord des soldes,
+> 100 % anglais, noir & blanc (vert/jaune pour les statuts).
 
 **[Manuel complet — français](MANUAL.fr.md)** · **[Full manual — English](MANUAL.en.md)**
 
