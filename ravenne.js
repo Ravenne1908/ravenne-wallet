@@ -2988,135 +2988,155 @@ async function qrPng(text, file) {
   await QR.toFile(file, text, { width: 512, margin: 2 });
 }
 
-async function simpleMenu() {
-  banner();
-  if (TTY) clack.intro(c.bold("Ravenne") + c.dim("  v" + VERSION + "  ·  " + V().active + "  ·  " + N().label));
-  if (!mainEvm()) {
-    console.log(c.vio("\n👋 Welcome! Ravenne will set up:"));
-    console.log(`   ${c.bold("1 MAIN wallet")} — your vault, kept private (seed on paper${c.dim(", optionally not even stored here")})`);
-    console.log(`   ${c.bold("RECEIVING addresses")} — give them out; everything is forwarded to main\n`);
-    if (await confirm("Start the guided setup?")) {
-      try { await cmdSetup([]); } catch (e) { console.log(c.err(`✗ ${e.message}`)); }
-    } else {
-      console.log(c.dim("No problem — you can create wallets from the menu below, or run the setup later with 'ravenne setup'."));
+const withTimeout = (p, ms) => Promise.race([p, sleep(ms).then(() => null)]);
+
+/* Snapshot léger pour l'écran d'accueil : EVM (chaîne active) + BTC + prix. */
+async function dashboardSnapshot() {
+  const k = netKey();
+  const m = mainEvm();
+  const recv = receivingEvm();
+  const addrs = [m, ...recv].filter(Boolean);
+  let evm = null;
+  if (addrs.length) {
+    const bals = await withTimeout(Promise.all(addrs.map(w =>
+      rpcCall(k, "eth_getBalance", [w.address, "latest"]).then(v => BigInt(v)).catch(() => null))), 6000);
+    if (Array.isArray(bals)) {
+      evm = {
+        main: m ? bals[0] : null,
+        recv: bals.slice(1).reduce((s, b) => (b ? s + b : s), 0n),
+        online: bals.some(b => b != null),
+      };
     }
   }
+  let btc = null;
+  if (BW().length) {
+    const arr = await withTimeout(getBtcBalances(), 6000);
+    if (Array.isArray(arr)) btc = arr.reduce((s, b) => (b ? s + b : s), 0n);
+  }
+  let prices = null;
+  if (settings().prices) prices = await withTimeout(maybePrices([k]), 4000);
+  return { k, evm, btc, prices, at: Date.now() };
+}
+
+function renderDashboard(snap) {
+  const k = netKey(), sym = NET[k].sym;
+  const totalEvm = snap.evm ? (snap.evm.main ?? 0n) + snap.evm.recv : null;
+  const fiatEvm = snap.prices && totalEvm != null ? netValue(totalEvm, k, snap.prices) : null;
+  const fiatBtc = snap.prices && snap.btc != null ? btcValue(snap.btc, snap.prices) : null;
+  const sumUsd = (fiatEvm || 0) + (fiatBtc || 0);
+  const used = [...receivingEvm(), ...receivingBtc()].filter(w => w.usedAt).length;
+  const row = (l, v, x = "") => c.soft(l.padEnd(13)) + v + (x ? c.soft("   " + x) : "");
+  const noMain = !mainEvm();
+
+  box("APERÇU", [
+    row("profil", c.bold(V().active), `· ${N().label}`),
+    row("MAIN", !mainEvm() ? c.dim("—") : snap.evm?.main != null ? c.bold(`${fmtAmt(snap.evm.main)} ${sym}`) : c.err("hors ligne")),
+    row("réception", snap.evm ? `${fmtAmt(snap.evm.recv)} ${sym}` : c.dim("—"), "en attente"),
+    row("total", totalEvm != null ? c.ok(`${fmtAmt(totalEvm)} ${sym}`) : c.dim("—"), fiatEvm != null ? `≈ ${usd(fiatEvm)}` : ""),
+    ...(BW().length ? [row("bitcoin", snap.btc != null ? c.ok(`${fmtBtc(snap.btc)} BTC`) : c.dim("—"), fiatBtc != null ? `≈ ${usd(fiatBtc)}` : "")] : []),
+    row("adresses", `${receivingEvm().length} EVM · ${receivingBtc().length} BTC`, used ? c.warn(`${used} déjà utilisée(s)`) : "toutes fraîches"),
+  ]);
+
+  if (sumUsd > 0) console.log(centerLine(c.soft("valeur totale  ") + c.bold(c.ok(usd(sumUsd)))));
+
+  const net = [
+    PROXY ? c.ok("● tunnel") : c.warn("○ aucun tunnel"),
+    settings().vpnCheck !== false ? c.ok("● vpn") : c.soft("○ vpn"),
+    (settings().privacy?.broadcast || "auto") === "rpc" ? c.soft("○ tx direct") : c.ok("● tx privé"),
+    settings().privacy?.queryJitter ? c.ok("● jitter") : c.soft("○ jitter"),
+  ];
+  console.log(centerLine(net.join(c.soft("  ·  "))));
+  if (!PROXY) console.log(centerLine(c.warn("⚠ envois bloqués sans tunnel — ravenne proxy <url>")));
+  if (noMain) console.log(centerLine(c.warn("aucun MAIN — lance la configuration")));
+
+  const hist = mergedHistory().slice(0, 3);
+  if (hist.length) {
+    console.log("");
+    box("ACTIVITÉ RÉCENTE", hist.map(x =>
+      `${c.soft(x.t)}  ${x.dir.padEnd(4)}  ${short(x.from)} → ${short(x.to)}  ${x.amountFmt}`));
+  }
+}
+
+async function simpleMenu() {
+  let snap = null;
   let lastActive = Date.now();
   while (true) {
-    if (settings().autolockMin > 0 && Date.now() - lastActive > settings().autolockMin * 60000) { await lockSession(); banner(); }
-    const _m = mainEvm();
-    console.log(c.dim(_m
-      ? `  main: ${short(_m.address)} · receiving: ${receivingEvm().length} EVM + ${receivingBtc().length} BTC · chain: ${N().label}\n`
-      : `  no main wallet yet — run the setup (option below) to create one\n`));
+    if (settings().autolockMin > 0 && Date.now() - lastActive > settings().autolockMin * 60000) {
+      await lockSession(); snap = null;
+    }
+    if (!snap || Date.now() - snap.at > 45000) {
+      snap = await spin("Lecture des soldes…", dashboardSnapshot).catch(() => null) || { k: netKey(), evm: null, btc: null, prices: null, at: Date.now() };
+    }
+    banner();
+    renderDashboard(snap);
     footer();
-    const { a } = await P({
-      type: "select", name: "a", message: "What do you want to do?",
-      choices: [
-        { title: "Receiving addresses (give these out)", value: "addr",
-          description: "Fresh addresses payers send to. One per payer for privacy — everything lands on your main." },
-        { title: "Balances (main + waiting)", value: "bal",
-          description: "What the main wallet holds, and what sits on receiving addresses waiting to be forwarded." },
-        { title: "Forward everything to main now", value: "sweep",
-          description: "Immediately move all funds from every receiving address (EVM + BTC) to the main wallets." },
-        { title: "Auto-forward daemon (randomized)", value: "auto",
-          description: "Runs until Ctrl+C: checks at random intervals and forwards automatically, with random delays." },
-        { title: "Swap coins (ETH ⇄ USDT/USDC)", value: "swap",
-          description: "Convert between coins via Uniswap (Ethereum): price preview + 1% slippage protection." },
-        { title: "Spend from main", value: "spend",
-          description: "Send from the main wallet to any address (requires the main key in the vault)." },
-        { title: "USB wallet", value: "usb",
-          description: "Create or open an encrypted wallet on a USB stick — keys stay in RAM, never on this disk." },
-        { title: "New temporary address (auto-delete)", value: 'temp',
-          description: 'Burner receiving address: forwards to main at expiry, then keys are erased.' },
-        { title: "Switch wallet", value: 'switch',
-          description: 'Open a different named wallet profile.' },
-        { title: "Switch chain", value: "chain",
-          description: "Change the active chain: Ethereum, Polygon, BNB, Arbitrum, Base, Optimism, local test." },
-        { title: "Settings", value: "set",
-          description: "VPN gate, price lookups, auto-lock delay, sweep threshold, mesh-VPN policy." },
-        { title: "Backup & security", value: "sec",
-          description: "Reveal seeds, export keystores, backup/restore the vault, change password, privacy notes." },
-        { title: "Diagnostics (check)", value: "check",
-          description: "Verify VPN, RPC connectivity, gate/vault health and the environment in one pass." },
-        { title: "Confidentialité (traçabilité)", value: "priv",
-          description: "Tunnel, diffusion privée, adresses réutilisées : ce qui peut te relier." },
-        { title: "Advanced mode (all commands)", value: "adv",
-          description: "Full menu with every feature: splits, consolidations, tokens, Bitcoin, offline signing…" },
-        { title: "Lock & quit", value: "quit",
-          description: "Clear the screen and exit — everything is encrypted on disk." },
-      ],
-    });
+    const noMain = !mainEvm();
+    const choices = [
+      ...(noMain ? [{ title: "⚙  Configurer MAIN + adresses de réception", value: "setup",
+        description: "Guide : seed MAIN (papier) + adresses de réception." }] : []),
+      { title: "＋  Recevoir — nouvelles adresses", value: "addr",
+        description: "Une adresse par payeur ; tout est renvoyé vers MAIN." },
+      { title: "↗  Envoyer", value: "send",
+        description: "Depuis un wallet du coffre vers n'importe quelle adresse." },
+      { title: "⇩  Tout renvoyer vers MAIN", value: "sweep",
+        description: "Sweep immédiat des adresses de réception (EVM + BTC)." },
+      { title: "◷  Auto-forward (daemon)", value: "auto",
+        description: "Forward automatique à intervalles aléatoires." },
+      { title: "⇄  Swap / conversion", value: "swap",
+        description: "Uniswap V2 — Ethereum mainnet." },
+      { title: "▤  Portefeuilles & soldes", value: "wallets",
+        description: "Tous les wallets de la chaîne active." },
+      { title: "◷  Historique", value: "hist",
+        description: "Transactions envoyées + synchronisées." },
+      ...(BW().length ? [{ title: "₿  Bitcoin", value: "btc", description: "Soldes et adresses BTC." }] : []),
+      ...(XW().length ? [{ title: "◎  Monero", value: "xmr", description: "Soldes XMR (engine requis)." }] : []),
+      { title: "◈  Confidentialité", value: "priv",
+        description: "Tunnel, diffusion privée, adresses réutilisées." },
+      { title: "⚙  Réglages", value: "set",
+        description: "Proxy, VPN, jitter, broadcast, auto-lock." },
+      { title: "⛨  Sécurité & sauvegardes", value: "sec",
+        description: "Seeds, export, backup, mot de passe, wipe." },
+      { title: "⌘  Mode avancé", value: "adv",
+        description: "Toutes les commandes : tokens, split, offline, XMR…" },
+      { title: "🗄  Coffre Vault", value: "vault",
+        description: "Wallets long terme, fichier et mot de passe séparés." },
+      { title: "⟳  Rafraîchir", value: "refresh", description: "Relire les soldes." },
+      { title: "⏻  Quitter", value: "quit", description: "Tout est chiffré sur disque." },
+    ];
+    const { a } = await P({ type: "select", name: "a", message: "Que veux-tu faire ?", choices });
     lastActive = Date.now();
     try {
       if (a === "quit") { console.clear(); console.log("Bye."); process.exit(0); }
+      else if (a === "refresh") { snap = null; continue; }
+      else if (a === "setup") await cmdSetup([]);
       else if (a === "addr") {
         await cmdAddresses([]);
-        if (await confirm("Add new receiving addresses?")) {
-          const { n } = await P({ type: "number", name: "n", message: "How many?", initial: 3, min: 1, max: 100 });
+        if (await confirm("Ajouter de nouvelles adresses ?")) {
+          const { n } = await P({ type: "number", name: "n", message: "Combien ?", initial: 3, min: 1, max: 100 });
           await cmdAddresses([String(n)]);
         }
       }
-      else if (a === "bal") await simpleBalances();
+      else if (a === "send") await cmdSend([]);
       else if (a === "sweep") await cmdSweep([]);
       else if (a === "auto") {
-        const { m } = await P({ type: "number", name: "m", message: "Check interval in minutes (randomized)?", initial: 15, min: 1, max: 720 });
+        const { m } = await P({ type: "number", name: "m", message: "Intervalle en minutes (aléatoire) ?", initial: 15, min: 1, max: 720 });
         await cmdAuto([String(m)]);
       }
       else if (a === "swap") await cmdSwap([]);
-      else if (a === "chain") {
-        const { k } = await P({ type: "select", name: "k", message: "Active chain:",
-          choices: Object.entries(NET).map(([k, v]) => ({ title: `${v.label} (${v.sym})`, value: k,
-            description: k === "local" ? "Local test chain (Ganache) — practice with fake money." : `Switch balances/sends/swaps to ${v.label}.` })) });
-        await cmdNetwork([k]);
-      }
-      else if (a === "set") await quickSettings();
-      else if (a === "check") await cmdCheck();
+      else if (a === "wallets") await cmdList([]);
+      else if (a === "hist") await cmdHistory([]);
+      else if (a === "btc") await cmdBtc(["list"]);
+      else if (a === "xmr") await cmdXmr(["list"]);
       else if (a === "priv") await cmdPrivacy();
-      else if (a === 'temp') {
-        const { d } = await P({ type: 'select', name: 'd', message: 'Lifetime of the address?',
-          choices: [
-            { title: '1 hour', value: '1h' },
-            { title: '6 hours', value: '6h' },
-            { title: '24 hours (recommended)', value: '24h' },
-            { title: '3 days', value: '3d' },
-            { title: '7 days', value: '7d' },
-          ] });
-        await cmdTemp([d, 1]);
-      }
-      else if (a === 'switch') { console.clear(); await pickProfile(); }
-      else if (a === "usb") {
-        const { s } = await P({ type: "select", name: "s", message: "USB wallet:",
-          choices: [ { title: "Open (mount a USB wallet)", value: "open" },
-                     { title: "Create a new one on a USB stick", value: "create" },
-                     ...(W().some(w => w.usb) ? [{ title: "Close / unmount (purge keys from RAM)", value: "close" }] : []) ] });
-        if (s === "open") await cmdUsb(["open"]);
-        else if (s === "create") await cmdUsb(["create"]);
-        else await cmdUsb(["close"]);
-      }
-      else if (a === "spend") {
-        const m = mainEvm();
-        if (!m) {
-          console.log(c.warn(`\nNo main wallet yet — run the setup first.`));
-        } else if (!m.privateKey) {
-          console.log(c.warn(`\nMain is watch-only (maximum security) — its key is not in the vault.`));
-          console.log(c.dim("  To spend from main: 'ravenne import' its paper seed on this machine,"));
-          console.log(c.dim("  or keep a separate spending wallet. Receiving wallets can always send (advanced: send)."));
-        } else {
-          const r = await P([
-            { type: "text", name: "t", message: "Send to? (address, wallet label or book entry)" },
-            { type: "text", name: "a", message: `Amount in ${N().sym} (or "max"):` },
-          ]);
-          await cmdSend([String(W().indexOf(m)), r.t, r.a]);
-        }
-      }
+      else if (a === "set") await quickSettings();
       else if (a === "sec") await securityMenu();
-      else if (a === "adv") { console.log(c.dim("\nAdvanced mode — Quit there exits the app.\n")); await advancedMenu(); return; }
+      else if (a === "vault") await vaultMode();
+      else if (a === "adv") { await advancedMenu(true); }
     } catch (e) { console.log(c.err(`\n✗ ${e.message}`)); }
-    await P({ type: "text", name: "_", message: c.dim("— Enter to continue —") });
+    snap = null;
+    await P({ type: "text", name: "_", message: c.dim("— Entrée —") });
     lastActive = Date.now();
     console.clear();
-    console.log(centerLine(c.accent("◆") + " " + c.bold(c.wht("RAVENNE")) + c.soft("  ·  mode simple")));
-    console.log(centerLine(pillsLine()) + "\n");
   }
 }
 
@@ -4010,7 +4030,7 @@ async function runAction(a) {
     else await (MENU_ACTIONS[a] || (() => {}))([]);
   } catch (e) { console.log(c.err(`\n✗ ${e.message}`)); }
 }
-async function advancedMenu() {
+async function advancedMenu(fromHome = false) {
   banner();
   let lastActive = Date.now();
   const CAT_DESC = {
@@ -4088,9 +4108,12 @@ async function advancedMenu() {
     const { cat } = await P({
       type: "select", name: "cat", message: "Main menu:",
       choices: [...Object.keys(MENU).map(t => ({ title: t, value: t, description: CAT_DESC[t] })),
-                { title: "Quit", value: "__quit", description: "Clear the screen and exit." }],
+                fromHome
+                  ? { title: "←  Menu principal", value: "__home", description: "Retour au tableau de bord." }
+                  : { title: "Quit", value: "__quit", description: "Clear the screen and exit." }],
     });
     lastActive = Date.now();
+    if (cat === "__home") { console.clear(); return; }
     if (cat === "__quit") { console.clear(); console.log("Bye."); process.exit(0); }
     while (true) {
       const { a } = await P({
@@ -4311,14 +4334,6 @@ async function main() {
       V().active = state.flags.profile;
     }
     await purgeExpired();
-    const { mode: modeChoice } = await P({ type: "select", name: "mode", message: "Mode", initial: "simple", choices: [
-      { title: "Simple", value: "simple", description: "create wallets, receiving + temp addresses, send" },
-      { title: "Advanced", value: "advanced", description: "every command and setting" },
-      { title: "Vault", value: "vault", description: "secured long-term wallets - separate file, own password, no keys on disk" },
-    ] });
-    console.clear();
-    if (modeChoice === "vault") return vaultMode();
-    if (modeChoice === "advanced") return advancedMenu();
     return simpleMenu();
   }
   if (args[0] === "menu") {
