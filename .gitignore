@@ -17,6 +17,7 @@ net.ravenne.json
 
 # generated / intermediate
 *.zip
+*.sha256
 ravenne-256.png
 _*.tmp
 tools/monero/wallets/

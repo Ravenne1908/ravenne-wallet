@@ -6,7 +6,7 @@
   "bin": { "ravenne": "ravenne.js" },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ravennelucas1908-max/ravenne-wallet.git"
+    "url": "git+https://github.com/Ravenne1908/ravenne-wallet.git"
   },
   "engines": { "node": ">=18" },
   "scripts": {
