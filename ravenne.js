@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 🪶 Ravenne Wallet v4 — terminal wallet manager (EVM chains + Bitcoin)
+//  Ravenne Wallet v4 — terminal wallet manager (EVM chains + Bitcoin)
 //
 // Security model:
 //   • access.ravenne.json — scrypt(password, salt) gate checked at every launch
@@ -25,7 +25,7 @@ import { HDKey } from "@scure/bip32";
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
-const VERSION = "9.4.0";
+const VERSION = "9.4.1";
 process.title = "Ravenne Wallet";
 
 /* Network-layer privacy: route ALL outgoing HTTP (RPC, explorers, prices)
@@ -66,7 +66,7 @@ async function setupProxy() {
     process.exit(1);
   }
   if (cfg?.requireProxy && state.flags?.noProxy)
-    console.log(c.warn("⚠ --no-proxy: traffic will leave this machine directly (IP exposed)."));
+    console.log(c.warn("! --no-proxy: traffic will leave this machine directly (IP exposed)."));
 }
 /* When compiled to an .exe (pkg), files must live NEXT TO the exe (snapshot FS is read-only).
    In a CJS bundle, import.meta.url is unavailable — fall back to argv[1]. */
@@ -134,20 +134,19 @@ const ERC20_ABI = [
 
 /* ─────────── Colors & basic helpers ─────────── */
 const TTY = process.stdout.isTTY;
-const COL256 = TTY && (process.env.COLORTERM === "truecolor" || !!process.env.WT_SESSION || /256color/.test(process.env.TERM || ""));
+/* Monochrome UI: default text + green (ok) / yellow (warn, err). */
 const c = {
-  vio: s => TTY ? `\x1b[35m${s}\x1b[0m` : s,
   ok:  s => TTY ? `\x1b[32m${s}\x1b[0m` : s,
-  err: s => TTY ? `\x1b[31m${s}\x1b[0m` : s,
   warn:s => TTY ? `\x1b[33m${s}\x1b[0m` : s,
+  err: s => TTY ? `\x1b[1;33m${s}\x1b[0m` : s,
   dim: s => TTY ? `\x1b[90m${s}\x1b[0m` : s,
   bold:s => TTY ? `\x1b[1m${s}\x1b[0m` : s,
-  cyan:s => TTY ? `\x1b[36m${s}\x1b[0m` : s,
-  wht: s => TTY ? `\x1b[97m${s}\x1b[0m` : s,
-  /* 256-color accents when the terminal supports them */
-  accent: s => COL256 ? `\x1b[38;5;177m${s}\x1b[0m` : (TTY ? `\x1b[95m${s}\x1b[0m` : s),
-  soft:   s => COL256 ? `\x1b[38;5;245m${s}\x1b[0m` : (TTY ? `\x1b[90m${s}\x1b[0m` : s),
-  blue:   s => COL256 ? `\x1b[38;5;111m${s}\x1b[0m` : (TTY ? `\x1b[94m${s}\x1b[0m` : s),
+  vio: s => TTY ? `\x1b[1m${s}\x1b[0m` : s,
+  cyan:s => s,
+  wht: s => TTY ? `\x1b[1m${s}\x1b[0m` : s,
+  accent: s => TTY ? `\x1b[1m${s}\x1b[0m` : s,
+  soft:   s => TTY ? `\x1b[90m${s}\x1b[0m` : s,
+  blue:   s => s,
   inv:    s => TTY ? `\x1b[7m${s}\x1b[0m` : s,
 };
 const tag = (label, on, okText = label) =>
@@ -316,7 +315,7 @@ function pillsLine() {
   if (!state.payload) return "";
   const s = settings();
   const bcast = (s.privacy?.broadcast || "auto");
-  const mode = bcast === "rpc" ? "tx direct" : "tx privé";
+  const mode = bcast === "rpc" ? "direct tx" : "private tx";
   return [
     tag("proxy", !!PROXY, PROXY ? "proxy" : "proxy"),
     tag("vpn", s.vpnCheck !== false, "vpn"),
@@ -333,7 +332,7 @@ function banner() {
   if (!TTY || w === 0 || w >= 82) {
     for (const l of WATERMARK) console.log(c.accent(centerLine(l)));
   } else {
-    console.log(centerLine(c.accent(c.bold("◆ RAVENNE")) + c.soft("  private terminal wallet")));
+    console.log(centerLine(c.bold("RAVENNE") + c.soft("  private terminal wallet")));
   }
   console.log("");
   console.log(centerLine(c.bold(c.wht("RAVENNE")) + c.soft(" WALLET") + c.soft(`  v${VERSION}`)));
@@ -349,7 +348,7 @@ function banner() {
 }
 function header(title) {
   console.log("");
-  console.log(centerLine(`${c.accent("◆")} ${c.bold(c.wht(title))}  ${c.soft("─".repeat(Math.max(6, 46 - title.length)))}`));
+  console.log(centerLine(`${c.bold(title)}  ${c.soft("─".repeat(Math.max(6, 46 - title.length)))}`));
 }
 function box(title, lines) {
   const inner = Math.max(title.length + 4, ...lines.map(l => stripA(l).length), 20) + 3;
@@ -372,7 +371,7 @@ function table(headers, rows, opts = {}) {
     return aligns[i] === "r" ? pad + s : s + pad;
   }).join("  ");
   const sep = ch => c.soft("  " + widths.map(w => "─".repeat(w)).join(ch));
-  if (!rows.length) { console.log(c.soft("  (rien à afficher)")); return; }
+  if (!rows.length) { console.log(c.soft("  (nothing to show)")); return; }
   const blockW = widths.reduce((a, b) => a + b, 0) + (widths.length - 1) * 2 + 2;
   const rendered = [sep("┬"), c.bold(c.wht(row(headers))), sep("┼"), ...rows.map(r => row(r)), sep("┴")];
   for (const l of shift(rendered, blockW)) console.log(l);
@@ -380,8 +379,8 @@ function table(headers, rows, opts = {}) {
 function statusLine() {
   const s = settings();
   const bits = [
-    `${c.accent("⛓")} ${c.bold(N().label)}`,
-    `${c.soft("wallet")} ${c.bold(W().length)}${c.soft(" EVM")}${BW().length ? c.soft(" + ") + c.bold("₿" + BW().length) : ""}`,
+    c.bold(N().label),
+    `${c.soft("wallets")} ${c.bold(W().length)}${BW().length ? c.soft(" + ") + c.bold(BW().length + " BTC") : ""}`,
     PROXY ? c.ok("proxy on") : c.warn("proxy off"),
     s.privacy?.queryJitter ? c.ok("jitter on") : c.soft("jitter off"),
     c.soft(`lock ${s.autolockMin || "off"}m`),
@@ -390,11 +389,11 @@ function statusLine() {
   console.log(centerLine(rule(56)) + "\n");
 }
 function footer() {
-  console.log(centerLine(c.soft("↑↓ naviguer  ·  ⏎ valider  ·  esc annuler")));
+  console.log(centerLine(c.soft("up/down move  ·  enter select  ·  esc cancel")));
   console.log("");
 }
 async function spin(label, fn) {
-  if (!TTY) { console.log(c.dim(`• ${label}`)); return fn(); }
+  if (!TTY) { console.log(c.dim(`* ${label}`)); return fn(); }
   const sp = clack.spinner();
   sp.start(label);
   try { const r = await fn(); sp.stop(label + "  ✓"); return r; }
@@ -402,7 +401,7 @@ async function spin(label, fn) {
 }
 async function countdown(sec) {
   for (let s = sec; s > 0; s--) {
-    process.stdout.write(`\r  ${c.dim(`⏳ next send in ${s}s…`)}`);
+    process.stdout.write(`\r  ${c.dim(` next send in ${s}s…`)}`);
     await sleep(1000);
   }
   process.stdout.write("\r\x1b[K");
@@ -431,7 +430,7 @@ function gateVerify(pass) {
   } catch { return false; }
 }
 async function initGate() {
-  console.log(c.vio("\n🔐 First launch — choose your master password."));
+  console.log(c.vio("\n First launch — choose your master password."));
   console.log(c.dim("   It protects the tool AND encrypts the vault. It cannot be recovered."));
   let pass = process.env.RAVENNE_PASS;
   if (!pass) {
@@ -472,11 +471,11 @@ async function unlockGate() {
   if (!fs.existsSync(GATE_FILE)) { await initGate(); return; }
   const wait = gateLockRemaining();
   if (wait > 0) {
-    console.log(c.err(`🔒 Too many failed attempts — locked for ~${Math.ceil(wait / 60000)} min.`));
+    console.log(c.err(` Too many failed attempts — locked for ~${Math.ceil(wait / 60000)} min.`));
     process.exit(1);
   }
   clearStep();
-  if (!process.env.RAVENNE_PASS) console.log(c.dim("\n🔒 Ravenne is locked — enter your master password."));
+  if (!process.env.RAVENNE_PASS) console.log(c.dim("\n Ravenne is locked — enter your master password."));
   for (let i = 0; i < 3; i++) {
     const p = process.env.RAVENNE_PASS || (await P({ type: "password", name: "p", message: "Master password:" })).p;
     if (p && gateVerify(p)) { state.pass = p; gateClearFails(); return; }
@@ -489,7 +488,7 @@ async function unlockGate() {
     const meta = gateFail();
     if (gateLockRemaining() > 0) {
       logGateAttempt(true);
-      console.log(c.err(`🔒 Too many failed attempts — locked for ~${Math.ceil(gateLockRemaining() / 60000)} min.`));
+      console.log(c.err(` Too many failed attempts — locked for ~${Math.ceil(gateLockRemaining() / 60000)} min.`));
       process.exit(1);
     }
     if (meta.fails >= 5) console.log(c.warn(`  (${meta.fails} failed attempts recorded)`));
@@ -509,7 +508,7 @@ function logGateAttempt(locked) {
 async function lockSession(clear = true) {
   if (clear) console.clear();
   state.pass = null; state.payload = null;
-  console.log(c.vio("🔒 Session locked."));
+  console.log(c.vio(" Session locked."));
   await unlockGate();
   ensureVault();
   await purgeExpired(true);
@@ -643,7 +642,7 @@ async function purgeExpired(quiet = false) {
     const w = list[i];
     if (!w.expiresAt || w.expiresAt > now) continue;
     if (w.privateKey && mainEvm() && !clearnetAllowed()) {
-      console.log(c.warn(`  ! "${w.label}" expiré mais conservé : aucun proxy (configure un tunnel ou allowclearnet)`));
+      console.log(c.warn(`  ! "${w.label}" expired but kept: no proxy (configure a tunnel or allowclearnet)`));
       continue;
     }
     if (w.privateKey && mainEvm()) {
@@ -1023,7 +1022,7 @@ function broadcastMode(k = netKey()) {
   if (configured === "rpc") return "rpc";
   if (k !== "eth") {
     if (configured === "private")
-      throw new Error("Diffusion privée = Ethereum mainnet uniquement (Flashbots). Utilise --broadcast rpc sur cette chaîne.");
+      throw new Error("Private broadcast = Ethereum mainnet only (Flashbots). Use --broadcast rpc on this chain.");
     return "rpc";
   }
   return "private";
@@ -1039,13 +1038,13 @@ async function flashbotsBroadcast(wallet, req) {
   });
   const j = await r.json().catch(() => null);
   if (j?.error) throw new Error("Flashbots: " + (j.error.message || JSON.stringify(j.error)));
-  if (!j?.result) throw new Error("Flashbots: réponse inattendue");
+  if (!j?.result) throw new Error("Flashbots: unexpected response");
   return j.result;
 }
 async function waitHash(hash, prov) {
   return spin("Waiting for confirmation…", async () => {
     const r = await prov.waitForTransaction(hash, 1, 180000);
-    if (!r) throw new Error("Transaction diffusée mais non confirmée (3 min) : " + hash);
+    if (!r) throw new Error("Transaction broadcast but not confirmed (3 min): " + hash);
     return r;
   });
 }
@@ -1053,19 +1052,19 @@ async function waitHash(hash, prov) {
 function clearnetAllowed() {
   return !!PROXY || settings().privacy?.allowClearnetSend === true || state._clearnetOk === true;
 }
-async function clearnetSendGuard(what = "cette transaction") {
+async function clearnetSendGuard(what = "this transaction") {
   if (clearnetAllowed()) return true;
-  if (state._clearnetWarned) return false;   // déjà expliqué dans cette session
-  box("TRAÇABILITÉ — AUCUN TUNNEL", [
-    "Aucun proxy/Tor actif.",
-    `Ton IP sera visible par les RPC/explorateurs pendant ${what}.`,
+  if (state._clearnetWarned) return false;   // already explained this session
+  box("TRACEABILITY — NO TUNNEL", [
+    "No proxy/Tor is active.",
+    `Your IP will be visible to RPCs/explorers during ${what}.`,
     "",
-    c.ok("Active un tunnel :   ravenne proxy http://127.0.0.1:8118"),
-    c.soft("Ou accepte le risque : ravenne settings allowclearnet on"),
+    c.ok("Start a tunnel :    ravenne proxy http://127.0.0.1:8118"),
+    c.soft("Or accept the risk : ravenne settings allowclearnet on"),
   ]);
   state._clearnetWarned = true;
   if (!TTY) return false;
-  const { v } = await P({ type: "text", name: "v", message: `Tape ${c.bold("CLEARNET-OK")} pour envoyer sans tunnel :` });
+  const { v } = await P({ type: "text", name: "v", message: `Type ${c.bold("CLEARNET-OK")} to send without a tunnel:` });
   if (v !== "CLEARNET-OK") return false;
   state._clearnetOk = true;
   return true;
@@ -1075,7 +1074,7 @@ async function doSend(fromIdx, toAddr, valueWei, netK, token = null) {
   const src = W()[fromIdx];
   const mode = broadcastMode(netK);
   if (src.ledgerPath) {
-    if (mode === "private") throw new Error("Diffusion privée non supportée avec Ledger — utilise --broadcast rpc.");
+    if (mode === "private") throw new Error("Private broadcast is not supported with Ledger — use --broadcast rpc.");
     return doLedgerSend(fromIdx, toAddr, valueWei, netK, token);
   }
   const prov = new JsonRpcProvider(rpcUrl(netK));
@@ -1086,7 +1085,7 @@ async function doSend(fromIdx, toAddr, valueWei, netK, token = null) {
       ? { to: token.addr, value: 0n,
           data: new Contract(token.addr, ERC20_ABI).interface.encodeFunctionData("transfer", [toAddr, valueWei]) }
       : { to: toAddr, value: valueWei };
-    const hash = await spin("Diffusion privée (Flashbots)…", () => flashbotsBroadcast(w, req));
+    const hash = await spin("Private broadcast (Flashbots)…", () => flashbotsBroadcast(w, req));
     rc = await waitHash(hash, prov);
   } else {
     if (token) {
@@ -1367,7 +1366,7 @@ async function cmdSend(args) {
   requireKey(from);
   const to = resolveTo(toA);
   if (to.addr.startsWith("0x")) await guardRecipient(to.addr);
-  if (!(await clearnetSendGuard("l'envoi EVM"))) return console.log("Annulé — aucun tunnel réseau.");
+  if (!(await clearnetSendGuard("the EVM send"))) return console.log("Cancelled — no network tunnel.");
   const prov = provider();
   let token = null;
   if (state.flags.token) {
@@ -1490,7 +1489,7 @@ async function cmdSplit(args) {
   requireKey(from);
   const n = Math.min(Math.max(parseInt(nA, 10) || 2, 2), 50);
   const random = state.flags.random;
-  if (!(await clearnetSendGuard("le split"))) return console.log("Annulé — aucun tunnel réseau.");
+  if (!(await clearnetSendGuard("the split"))) return console.log("Cancelled — no network tunnel.");
   const prov = provider();
   const bal = await spin("Checking balance…", () => prov.getBalance(W()[from].address));
   const per = await feePerTx(prov);
@@ -1520,7 +1519,7 @@ async function cmdSplit(args) {
     const balNow = await prov.getBalance(W()[from].address);
     const perNow = await feePerTx(prov).catch(() => per);
     const value = i === n - 1 ? balNow - perNow : amounts[i];
-    if (value <= 0n) { console.log(c.warn(`  ⚠ share ${i + 1} skipped (dust)`)); continue; }
+    if (value <= 0n) { console.log(c.warn(`  ! share ${i + 1} skipped (dust)`)); continue; }
     await betweenSends(i, n);
     console.log(c.dim(`\n→ Send ${i + 1}/${n} → #${W().indexOf(news[i])} ${news[i].label}`));
     const { hash, fee, block } = await doSend(from, news[i].address, value, netKey());
@@ -1528,7 +1527,7 @@ async function cmdSplit(args) {
     console.log(c.ok(`   ✓ ${fmtAmt(value)} ${N().sym} (block ${block}, fee ${fmtAmt(fee)})`));
     printTxLink(hash, netKey());
   }
-  console.log(c.ok(`\n✅ Split done: ${fmtAmt(sent)} ${N().sym} spread across ${n} new wallets.`));
+  console.log(c.ok(`\n Split done: ${fmtAmt(sent)} ${N().sym} spread across ${n} new wallets.`));
 }
 async function cmdConsolidate(args) {
   if (W().length < 2) throw new Error("Consolidation needs at least 2 wallets.");
@@ -1536,7 +1535,7 @@ async function cmdConsolidate(args) {
   if (targetA == null) targetA = (await P({ type: "text", name: "v", message: `Gather everything into which wallet? (0-${W().length - 1})` })).v;
   const target = findWallet(targetA);
   if (target < 0) throw new Error(`Target wallet not found: "${targetA}"`);
-  if (!(await clearnetSendGuard("la consolidation"))) return console.log("Annulé — aucun tunnel réseau.");
+  if (!(await clearnetSendGuard("the consolidation"))) return console.log("Cancelled — no network tunnel.");
   const prov = provider();
   const bals = await spin("Scanning wallets…", () => getBalances(netKey()));
   const per = await feePerTx(prov);
@@ -1555,7 +1554,7 @@ async function cmdConsolidate(args) {
     const bal = await prov.getBalance(x.w.address);
     const perNow = await feePerTx(prov).catch(() => per);
     const value = bal - perNow;
-    if (value <= 0n) { console.log(c.warn(`\n⚠ #${x.i} empty, skipped.`)); continue; }
+    if (value <= 0n) { console.log(c.warn(`\n! #${x.i} empty, skipped.`)); continue; }
     await betweenSends(done, plan.length);
     console.log(c.dim(`\n→ #${x.i} ${x.w.label} → #${target}…`));
     const { hash, fee, block } = await doSend(x.i, W()[target].address, value, netKey());
@@ -1563,7 +1562,7 @@ async function cmdConsolidate(args) {
     console.log(c.ok(`   ✓ ${fmtAmt(value)} ${N().sym} (block ${block}, fee ${fmtAmt(fee)})`));
     printTxLink(hash, netKey());
   }
-  console.log(c.ok(`\n✅ Consolidation done: ≈ ${fmtAmt(got)} ${N().sym} gathered on #${target} ${W()[target].label}.`));
+  console.log(c.ok(`\n Consolidation done: ≈ ${fmtAmt(got)} ${N().sym} gathered on #${target} ${W()[target].label}.`));
 }
 async function cmdStats() {
   const nets = state.flags.all ? Object.keys(NET) : [netKey()];
@@ -1750,7 +1749,7 @@ async function cmdSync() {
         await jit();
       }
       return out;
-    }).catch(e => { console.log(c.warn(`  ⚠ ${w.label}: ${e.message}`)); return null; });
+    }).catch(e => { console.log(c.warn(`  ! ${w.label}: ${e.message}`)); return null; });
     if (!items) continue;
     total += mergeChainTx(cur(), items, netKey());
     await jit();
@@ -1806,7 +1805,7 @@ async function cmdPhrase(args) {
   if (i < 0) throw new Error(`Wallet not found: "${a}"`);
   const w = W()[i];
   if (!w.phrase) return console.log(c.warn(`#${i} has no stored seed phrase (imported by key, watch-only or Ledger).`));
-  console.log(c.warn(`\n⚠  Seed phrase of #${i} ${w.label}${w.seedPath ? ` (${w.seedPath})` : ""} — never show this to anyone:`));
+  console.log(c.warn(`\n!  Seed phrase of #${i} ${w.label}${w.seedPath ? ` (${w.seedPath})` : ""} — never show this to anyone:`));
   if (!(await confirm("Reveal anyway?"))) return console.log("Cancelled.");
   console.log(c.bold(`\n  ${w.phrase}\n`));
   if (!state.autoYes) {
@@ -1858,7 +1857,7 @@ async function cmdRemove(args) {
   const i = findWallet(a);
   if (i < 0) throw new Error(`Wallet not found: "${a}"`);
   const w = W()[i];
-  console.log(c.warn(`\n⚠  You are about to remove #${i} ${w.label} ${w.address} from the vault.`));
+  console.log(c.warn(`\n!  You are about to remove #${i} ${w.label} ${w.address} from the vault.`));
   if (w.privateKey)
     console.log(c.err("   Without its seed phrase, private key or a keystore elsewhere, its funds are UNRECOVERABLE."));
   else console.log(c.dim("   (watch-only/Ledger entry — the key is not stored here, nothing to lose)"));
@@ -1900,7 +1899,7 @@ async function cmdSettings(args) {
     box("SETTINGS", [
       `privacy     rotation RPC ${s.privacy?.rpcRotation !== false ? "ON" : "OFF"} · jitter ${s.privacy?.queryJitter ? "ON" : "OFF"}`,
       `proxy       ${PROXY ? c.ok(PROXY) : "none"} · required ${netConfig()?.requireProxy ? c.ok("YES") : "no"}`,
-      `diffusion   ${((s.privacy?.broadcast) || "auto") === "rpc" ? "RPC public" : c.ok("privée (Flashbots, ETH)")} · clearnet ${s.privacy?.allowClearnetSend ? c.warn("autorisé") : c.ok("bloqué")}`,
+      `broadcast   ${((s.privacy?.broadcast) || "auto") === "rpc" ? "public RPC" : c.ok("private (Flashbots, ETH)")} · clearnet ${s.privacy?.allowClearnetSend ? c.warn("allowed") : c.ok("blocked")}`,
       `btc api     ${s.btcApi ? c.ok(s.btcApi) : "Blockstream (public)"}`,
       `vpn check   ${s.vpnCheck ? c.ok("ON  (no connection without an active VPN)") : "OFF"} · fail-closed ${s.vpnFailClosed !== false ? c.ok("YES") : "no"}`,
       `prices      ${s.prices ? "ON  (fiat values via CoinGecko)" : "OFF (no price queries — better privacy)"}`,
@@ -1916,11 +1915,11 @@ async function cmdSettings(args) {
     const v = String(args[1] || "").toLowerCase();
     if (!["auto", "private", "rpc"].includes(v)) throw new Error("broadcast: auto | private | rpc");
     (s.privacy ??= {}).broadcast = v; save();
-    return console.log(c.ok(v === "rpc" ? "✓ Diffusion via RPC public (traçable)" : "✓ Diffusion privée (Flashbots) sur Ethereum"));
+    return console.log(c.ok(v === "rpc" ? "✓ Broadcasting via public RPC (traceable)" : "✓ Private broadcast (Flashbots) on Ethereum"));
   }
   if (args[0] === "allowclearnet") {
     (s.privacy ??= {}).allowClearnetSend = args[1] !== "off"; save();
-    return console.log(c.ok(`✓ Envois sans tunnel ${s.privacy.allowClearnetSend ? "AUTORISÉS (IP exposée)" : "bloqués"}`));
+    return console.log(c.ok(`✓ Clearnet sends ${s.privacy.allowClearnetSend ? "ALLOWED (IP exposed)" : "blocked"}`));
   }
   if (args[0] === "btcapi") {
     if (!args[1] || args[1] === "reset") { delete s.btcApi; save(); return console.log(c.ok("✓ BTC API → Blockstream public")); }
@@ -1985,7 +1984,7 @@ async function cmdPrice() {
   console.log(c.dim("\n   indicative rates — crypto is volatile"));
 }
 async function cmdChangePass() {
-  console.log(c.vio("\n🔑 Change master password (re-encrypts the vault)."));
+  console.log(c.vio("\n Change master password (re-encrypts the vault)."));
   let old = process.env.RAVENNE_PASS || state.pass || (await P({ type: "password", name: "v", message: "Current master password:" })).v;
   if (!gateVerify(old)) throw new Error("Current password is wrong.");
   const r = await P([
@@ -2021,7 +2020,7 @@ async function cmdWipe(args) {
        path.join(HERE, "gate-attempts.log"), path.join(HERE, "ui-errors.log"),
        path.join(HERE, "tools", "monero", "wallets")]
     : [ACTIVE_VAULT];
-  console.log(c.err(`\n☠  WIPE destroys ${all ? "EVERYTHING: vaults, duress vault, secure vault, caches and logs" : "the vault file"} permanently.`));
+  console.log(c.err(`\n!  WIPE destroys ${all ? "EVERYTHING: vaults, duress vault, secure vault, caches and logs" : "the vault file"} permanently.`));
   console.log(c.warn("   Your funds survive on-chain — recoverable ONLY with each wallet's seed phrase / keystore."));
   console.log(c.warn("   The master password gate (access.ravenne.json) is kept."));
   console.log(c.dim("   (ravenne wipe all = full local data wipe.)"));
@@ -2050,7 +2049,7 @@ async function cmdBtc(args) {
     header("NEW BITCOIN WALLETS (BIP84 native segwit)");
     console.log(c.ok(`✓ ${n} wallet${n > 1 ? "s" : ""} created${settings().btcTest ? c.warn(" · TESTNET") : ""}`));
     table(["#", "LABEL", "PATH", "ADDRESS"], created.map((w, i) => [`#${BW().length - n + i}`, w.label, w.path, w.address]));
-    console.log(c.warn(`\n⚠  Backup this phrase once — it owns ALL these BTC wallets:`));
+    console.log(c.warn(`\n!  Backup this phrase once — it owns ALL these BTC wallets:`));
     if (!state.autoYes) {
       if (await confirm("Reveal the seed phrase now?")) console.log(c.bold(`\n  ${phrase}\n`));
       await P({ type: "text", name: "_", message: c.dim("Press Enter to clear the screen…") });
@@ -2117,7 +2116,7 @@ async function cmdBtc(args) {
     const b = settings().book.find(x => x.label.toLowerCase() === toAddr.toLowerCase());
     if (b) toAddr = b.address;
     if (!/^(bc1|tb1|1|3|m|n)[a-zA-Z0-9]{25,}$/.test(toAddr)) throw new Error("Invalid Bitcoin recipient address.");
-    if (!(await clearnetSendGuard("l'envoi Bitcoin"))) return console.log("Annulé — aucun tunnel réseau.");
+    if (!(await clearnetSendGuard("the Bitcoin send"))) return console.log("Cancelled — no network tunnel.");
     const utxos = await spin("Fetching UTXOs…", () => btcFetch(`/address/${src.address}/utxo`));
     if (!Array.isArray(utxos) || !utxos.length) throw new Error("No UTXO to spend (empty wallet).");
     const rates = await spin("Fetching fees…", () => btcFetch("/fee-estimates"));
@@ -2139,7 +2138,7 @@ async function cmdBtc(args) {
       `From      btc#${from} ${src.label}  ${short(src.address)}`,
       `To        ${short(toAddr)}`,
       `Amount    ${fmtBtc(amountSat)} BTC   (est. fee ≈ ${fmtBtc(estFee)} @ ${satPerVb} sat/vB)`,
-      `UTXOs     ${utxos.length} available — change → adresse fraîche (m/84'/…/1'/0/${changeIdx})`,
+      `UTXOs     ${utxos.length} available — change → fresh address (m/84'/…/1'/0/${changeIdx})`,
     ]);
     if (!(await confirm("Confirm and broadcast?"))) return console.log("Cancelled.");
     const { hex, fee, inputs, change } = await spin("Building & signing transaction…",
@@ -2170,7 +2169,7 @@ async function cmdBtc(args) {
         }
         return all;
       }).catch(e => {
-        console.log(c.warn(`  ⚠ ${w.label}: ${e.message}`)); return null;
+        console.log(c.warn(`  ! ${w.label}: ${e.message}`)); return null;
       });
       if (!txs) continue;
       // map esplora shape → the merge format
@@ -2194,7 +2193,7 @@ async function btcPhrase(i) {
   if (i < 0) throw new Error(`BTC wallet not found (btc:0-${BW().length - 1})`);
   const w = BW()[i];
   if (!w.phrase) return console.log(c.warn(`btc#${i} is watch-only — no phrase stored.`));
-  console.log(c.warn(`\n⚠  Seed phrase of btc#${i} ${w.label} (${w.path}) — never show this to anyone:`));
+  console.log(c.warn(`\n!  Seed phrase of btc#${i} ${w.label} (${w.path}) — never show this to anyone:`));
   if (!(await confirm("Reveal anyway?"))) return console.log("Cancelled.");
   console.log(c.bold(`\n  ${w.phrase}\n`));
   if (!state.autoYes) {
@@ -2422,7 +2421,7 @@ async function cmdAddresses(args) {
   }
   const reused = [...receivingEvm(), ...receivingBtc()].filter(w => w.usedAt).length;
   if (reused) {
-    console.log(c.warn(`\n⚠ ${reused} address(es) already used and swept — do NOT hand them out again.`));
+    console.log(c.warn(`\n! ${reused} address(es) already used and swept — do NOT hand them out again.`));
     console.log(c.dim("  Reusing them links every payer to one identity. Create fresh ones: ravenne addresses 3"));
   }
   const m = mainEvm();
@@ -2460,9 +2459,9 @@ async function cmdSweep(opts = {}) {
   const mEvm = mainEvm(), mBtc = mainBtc();
   if (!mEvm) throw new Error("No main wallet — run 'ravenne setup' first.");
   if (!clearnetAllowed()) {
-    const ok = await clearnetSendGuard("le transfert vers la main");
+    const ok = await clearnetSendGuard("the transfer to MAIN");
     if (!ok) {
-      console.log(c.warn("Sweep annulé — configure un tunnel (ravenne proxy …) ou ravenne settings allowclearnet on."));
+      console.log(c.warn("Sweep cancelled — configure a tunnel (ravenne proxy …) or ravenne settings allowclearnet on."));
       return { count: 0 };
     }
   }
@@ -2478,11 +2477,11 @@ async function cmdSweep(opts = {}) {
   for (const k of chains) {
     const prov = makeProvider(k);
     const per = await feePerTx(prov).catch(() => null);
-    if (per == null) { console.log(c.warn(`  ⚠ ${NET[k].label}: RPC unreachable`)); continue; }
+    if (per == null) { console.log(c.warn(`  ! ${NET[k].label}: RPC unreachable`)); continue; }
     let rule = k === "eth" ? settings().convert?.eth : null;   // convert-on-forward rule
     if (rule) {
       try { resolveAsset(rule.from); resolveAsset(rule.to); }
-      catch (e) { console.log(c.warn(`  ⚠ ${NET[k].label}: convert rule ignored (${e.message})`)); rule = null; }
+      catch (e) { console.log(c.warn(`  ! ${NET[k].label}: convert rule ignored (${e.message})`)); rule = null; }
     }
     const recv = receivingEvm();
     for (let r = 0; r < recv.length; r++) {
@@ -2504,7 +2503,7 @@ async function cmdSweep(opts = {}) {
           try {
             const { block } = await execSwap(idx, from, to, bal - gasBudget);
             console.log(c.ok(`   ✓ swapped (block ${block}) — forwarding to main…`));
-          } catch (e) { console.log(c.warn(`   ⚠ swap failed (${e.shortMessage || e.message}) — forwarding as ETH instead`)); }
+          } catch (e) { console.log(c.warn(`   ! swap failed (${e.shortMessage || e.message}) — forwarding as ETH instead`)); }
         } else {
           const erc = new Contract(from.addr, ERC20_ABI, prov);
           const tkBal = await erc.balanceOf(w.address).catch(() => 0n);
@@ -2514,7 +2513,7 @@ async function cmdSweep(opts = {}) {
           try {
             const { block } = await execSwap(idx, from, to, tkBal);
             console.log(c.ok(`   ✓ swapped (block ${block}) — forwarding to main…`));
-          } catch (e) { console.log(c.warn(`   ⚠ swap failed (${e.shortMessage || e.message}) — forwarding as-is`)); }
+          } catch (e) { console.log(c.warn(`   ! swap failed (${e.shortMessage || e.message}) — forwarding as-is`)); }
         }
         /* forward whatever the wallet now holds (converted asset) to main */
         const balNow = await prov.getBalance(w.address);
@@ -2570,11 +2569,11 @@ async function cmdSweep(opts = {}) {
         if (auto && count > 0) await countdown(5 + Math.floor(Math.random() * 25));
         const got = await sweepBtcOne(BW().indexOf(e), mBtc.address);
         if (got > 0n) { count++; moved += 0n; markUsed(e); console.log(c.ok(`✓ ${e.label} → btc-main  ${fmtBtc(got)} BTC`)); }
-      } catch (e2) { console.log(c.warn(`  ⚠ ${e.label}: ${e2.message}`)); }
+      } catch (e2) { console.log(c.warn(`  ! ${e.label}: ${e2.message}`)); }
     }
   }
   if (!count) console.log(c.dim("\nNothing to forward — receiving wallets are empty (or below the fee threshold)."));
-  else console.log(c.ok(`\n✅ Forwarded ${count} transaction${count > 1 ? "s" : ""} to the main wallets.`));
+  else console.log(c.ok(`\n Forwarded ${count} transaction${count > 1 ? "s" : ""} to the main wallets.`));
   return { count };
 }
 
@@ -2596,10 +2595,10 @@ async function cmdAuto(args) {
     catch (e) { console.log(c.err(`✗ ${e.message}`)); }
     const waitMs = minutes * 60000 * (0.5 + Math.random());
     const next = new Date(Date.now() + waitMs).toLocaleTimeString("en-GB");
-    console.log(c.dim(`\n😴 sleeping until ~${next} …`));
+    console.log(c.dim(`\n sleeping until ~${next} …`));
     await sleep(waitMs);
     console.clear();
-    console.log(c.vio("🪶  RAVENNE — auto-forward daemon · Ctrl+C to stop"));
+    console.log(c.vio("  RAVENNE — auto-forward daemon · Ctrl+C to stop"));
   }
 }
 
@@ -2728,7 +2727,7 @@ async function vaultMode() {
         vaultState.data.wallets.push({ label, address: addr, phrase, path: "m/44'/60'/0'/0/0" });
         secEncrypt(vaultState.data, vaultState.pass);
         console.log(c.ok(`✓ Secured wallet "${label}" added — ${addr}`));
-        console.log(c.warn("⚠  24-word seed (shown once — the private key is NOT stored anywhere):"));
+        console.log(c.warn("!  24-word seed (shown once — the private key is NOT stored anywhere):"));
         console.log(c.bold("  " + phrase + "\n"));
         if (TTY) { await P({ type: "text", name: "_", message: c.dim("Press Enter to clear…") }); console.clear(); }
       } else if (a === "send") {
@@ -2758,7 +2757,7 @@ async function vaultMode() {
         const r = await P({ type: "text", name: "v", message: `Which wallet? (0-${vaultState.data.wallets.length - 1})` });
         const w = vaultState.data.wallets[parseInt(r.v, 10)];
         if (!w) continue;
-        console.log(c.warn(`\n⚠  Seed of "${w.label}" — never share it:`));
+        console.log(c.warn(`\n!  Seed of "${w.label}" — never share it:`));
         console.log(c.bold("  " + w.phrase + "\n"));
         if (TTY) { await P({ type: "text", name: "_", message: c.dim("Press Enter to clear…") }); console.clear(); }
       }
@@ -2947,7 +2946,7 @@ async function cmdProxy(args) {
   }
   if (!/^https?:\/\//.test(sub)) throw new Error("Usage: ravenne proxy http://127.0.0.1:8118 | off | require on|off");
   if (/\/\/[^/]*@/.test(sub))
-    console.log(c.warn("⚠ Credentials in the proxy URL are saved in clear text in net.ravenne.json"));
+    console.log(c.warn("! Credentials in the proxy URL are saved in clear text in net.ravenne.json"));
   await applyProxy(sub);
   return console.log(c.ok(`✓ Proxy saved and active: ${sub}`));
 }
@@ -2965,7 +2964,7 @@ async function cmdUsbBackup(args) {
     console.log(c.ok("  + " + path.basename(f)));
   }
   fs.writeFileSync(path.join(dir, "RESTORE.txt"),
-    "Pour restaurer : copiez ces fichiers dans votre dossier Ravenne (remplacez),\nou utilisez 'ravenne usbrestore <dossier>'. Fichiers déjà chiffrés.\n");
+    "To restore: copy these files into your Ravenne folder (overwrite),\nor use 'ravenne usbrestore <folder>'. Files are already encrypted.\n");
   console.log(c.ok(`✓ Backup complete → ${dir}`));
   return dir;
 }
@@ -2990,7 +2989,7 @@ async function qrPng(text, file) {
 
 const withTimeout = (p, ms) => Promise.race([p, sleep(ms).then(() => null)]);
 
-/* Snapshot léger pour l'écran d'accueil : EVM (chaîne active) + BTC + prix. */
+/* Lightweight snapshot for the home screen: EVM (active chain) + BTC + prices. */
 async function dashboardSnapshot() {
   const k = netKey();
   const m = mainEvm();
@@ -3028,31 +3027,31 @@ function renderDashboard(snap) {
   const row = (l, v, x = "") => c.soft(l.padEnd(13)) + v + (x ? c.soft("   " + x) : "");
   const noMain = !mainEvm();
 
-  box("APERÇU", [
-    row("profil", c.bold(V().active), `· ${N().label}`),
-    row("MAIN", !mainEvm() ? c.dim("—") : snap.evm?.main != null ? c.bold(`${fmtAmt(snap.evm.main)} ${sym}`) : c.err("hors ligne")),
-    row("réception", snap.evm ? `${fmtAmt(snap.evm.recv)} ${sym}` : c.dim("—"), "en attente"),
+  box("OVERVIEW", [
+    row("wallet", c.bold(V().active), `· ${N().label}`),
+    row("MAIN", noMain ? c.dim("—") : snap.evm?.main != null ? c.bold(`${fmtAmt(snap.evm.main)} ${sym}`) : c.err("offline")),
+    row("receiving", snap.evm ? `${fmtAmt(snap.evm.recv)} ${sym}` : c.dim("—"), "pending"),
     row("total", totalEvm != null ? c.ok(`${fmtAmt(totalEvm)} ${sym}`) : c.dim("—"), fiatEvm != null ? `≈ ${usd(fiatEvm)}` : ""),
     ...(BW().length ? [row("bitcoin", snap.btc != null ? c.ok(`${fmtBtc(snap.btc)} BTC`) : c.dim("—"), fiatBtc != null ? `≈ ${usd(fiatBtc)}` : "")] : []),
-    row("adresses", `${receivingEvm().length} EVM · ${receivingBtc().length} BTC`, used ? c.warn(`${used} déjà utilisée(s)`) : "toutes fraîches"),
+    row("addresses", `${receivingEvm().length} EVM · ${receivingBtc().length} BTC`, used ? c.warn(`${used} already used`) : "all fresh"),
   ]);
 
-  if (sumUsd > 0) console.log(centerLine(c.soft("valeur totale  ") + c.bold(c.ok(usd(sumUsd)))));
+  if (sumUsd > 0) console.log(centerLine(c.soft("total value  ") + c.bold(c.ok(usd(sumUsd)))));
 
   const net = [
-    PROXY ? c.ok("● tunnel") : c.warn("○ aucun tunnel"),
-    settings().vpnCheck !== false ? c.ok("● vpn") : c.soft("○ vpn"),
-    (settings().privacy?.broadcast || "auto") === "rpc" ? c.soft("○ tx direct") : c.ok("● tx privé"),
-    settings().privacy?.queryJitter ? c.ok("● jitter") : c.soft("○ jitter"),
+    PROXY ? c.ok("tunnel on") : c.warn("no tunnel"),
+    settings().vpnCheck !== false ? c.ok("vpn on") : c.soft("vpn off"),
+    (settings().privacy?.broadcast || "auto") === "rpc" ? c.soft("direct tx") : c.ok("private tx"),
+    settings().privacy?.queryJitter ? c.ok("jitter on") : c.soft("jitter off"),
   ];
   console.log(centerLine(net.join(c.soft("  ·  "))));
-  if (!PROXY) console.log(centerLine(c.warn("⚠ envois bloqués sans tunnel — ravenne proxy <url>")));
-  if (noMain) console.log(centerLine(c.warn("aucun MAIN — lance la configuration")));
+  if (!PROXY) console.log(centerLine(c.warn("sends blocked without a tunnel — ravenne proxy <url>")));
+  if (noMain) console.log(centerLine(c.warn("no MAIN wallet — run the setup")));
 
   const hist = mergedHistory().slice(0, 3);
   if (hist.length) {
     console.log("");
-    box("ACTIVITÉ RÉCENTE", hist.map(x =>
+    box("RECENT ACTIVITY", hist.map(x =>
       `${c.soft(x.t)}  ${x.dir.padEnd(4)}  ${short(x.from)} → ${short(x.to)}  ${x.amountFmt}`));
   }
 }
@@ -3065,45 +3064,46 @@ async function simpleMenu() {
       await lockSession(); snap = null;
     }
     if (!snap || Date.now() - snap.at > 45000) {
-      snap = await spin("Lecture des soldes…", dashboardSnapshot).catch(() => null) || { k: netKey(), evm: null, btc: null, prices: null, at: Date.now() };
+      snap = await spin("Reading balances…", dashboardSnapshot).catch(() => null)
+          || { k: netKey(), evm: null, btc: null, prices: null, at: Date.now() };
     }
     banner();
     renderDashboard(snap);
     footer();
     const noMain = !mainEvm();
     const choices = [
-      ...(noMain ? [{ title: "⚙  Configurer MAIN + adresses de réception", value: "setup",
-        description: "Guide : seed MAIN (papier) + adresses de réception." }] : []),
-      { title: "＋  Recevoir — nouvelles adresses", value: "addr",
-        description: "Une adresse par payeur ; tout est renvoyé vers MAIN." },
-      { title: "↗  Envoyer", value: "send",
-        description: "Depuis un wallet du coffre vers n'importe quelle adresse." },
-      { title: "⇩  Tout renvoyer vers MAIN", value: "sweep",
-        description: "Sweep immédiat des adresses de réception (EVM + BTC)." },
-      { title: "◷  Auto-forward (daemon)", value: "auto",
-        description: "Forward automatique à intervalles aléatoires." },
-      { title: "⇄  Swap / conversion", value: "swap",
+      ...(noMain ? [{ title: "Set up MAIN + receiving addresses", value: "setup",
+        description: "Guided: MAIN seed (paper) + receiving addresses." }] : []),
+      { title: "Receive — new addresses", value: "addr",
+        description: "One address per payer; everything forwards to MAIN." },
+      { title: "Send", value: "send",
+        description: "From a vault wallet to any address." },
+      { title: "Forward everything to MAIN", value: "sweep",
+        description: "Immediate sweep of receiving addresses (EVM + BTC)." },
+      { title: "Auto-forward (daemon)", value: "auto",
+        description: "Automatic forwarding at randomized intervals." },
+      { title: "Swap / convert", value: "swap",
         description: "Uniswap V2 — Ethereum mainnet." },
-      { title: "▤  Portefeuilles & soldes", value: "wallets",
-        description: "Tous les wallets de la chaîne active." },
-      { title: "◷  Historique", value: "hist",
-        description: "Transactions envoyées + synchronisées." },
-      ...(BW().length ? [{ title: "₿  Bitcoin", value: "btc", description: "Soldes et adresses BTC." }] : []),
-      ...(XW().length ? [{ title: "◎  Monero", value: "xmr", description: "Soldes XMR (engine requis)." }] : []),
-      { title: "◈  Confidentialité", value: "priv",
-        description: "Tunnel, diffusion privée, adresses réutilisées." },
-      { title: "⚙  Réglages", value: "set",
+      { title: "Wallets & balances", value: "wallets",
+        description: "Every wallet on the active chain." },
+      { title: "History", value: "hist",
+        description: "Sent + synced transactions." },
+      ...(BW().length ? [{ title: "Bitcoin", value: "btc", description: "BTC balances and addresses." }] : []),
+      ...(XW().length ? [{ title: "Monero", value: "xmr", description: "XMR balances (engine required)." }] : []),
+      { title: "Privacy", value: "priv",
+        description: "Tunnel, private broadcast, reused addresses." },
+      { title: "Settings", value: "set",
         description: "Proxy, VPN, jitter, broadcast, auto-lock." },
-      { title: "⛨  Sécurité & sauvegardes", value: "sec",
-        description: "Seeds, export, backup, mot de passe, wipe." },
-      { title: "⌘  Mode avancé", value: "adv",
-        description: "Toutes les commandes : tokens, split, offline, XMR…" },
-      { title: "🗄  Coffre Vault", value: "vault",
-        description: "Wallets long terme, fichier et mot de passe séparés." },
-      { title: "⟳  Rafraîchir", value: "refresh", description: "Relire les soldes." },
-      { title: "⏻  Quitter", value: "quit", description: "Tout est chiffré sur disque." },
+      { title: "Security & backups", value: "sec",
+        description: "Seeds, export, backup, password, wipe." },
+      { title: "Advanced mode", value: "adv",
+        description: "All commands: tokens, split, offline signing, XMR…" },
+      { title: "Vault", value: "vault",
+        description: "Long-term wallets, separate file and password." },
+      { title: "Refresh", value: "refresh", description: "Read balances again." },
+      { title: "Quit", value: "quit", description: "Everything is encrypted on disk." },
     ];
-    const { a } = await P({ type: "select", name: "a", message: "Que veux-tu faire ?", choices });
+    const { a } = await P({ type: "select", name: "a", message: "What do you want to do?", choices });
     lastActive = Date.now();
     try {
       if (a === "quit") { console.clear(); console.log("Bye."); process.exit(0); }
@@ -3111,15 +3111,15 @@ async function simpleMenu() {
       else if (a === "setup") await cmdSetup([]);
       else if (a === "addr") {
         await cmdAddresses([]);
-        if (await confirm("Ajouter de nouvelles adresses ?")) {
-          const { n } = await P({ type: "number", name: "n", message: "Combien ?", initial: 3, min: 1, max: 100 });
+        if (await confirm("Add new receiving addresses?")) {
+          const { n } = await P({ type: "number", name: "n", message: "How many?", initial: 3, min: 1, max: 100 });
           await cmdAddresses([String(n)]);
         }
       }
       else if (a === "send") await cmdSend([]);
       else if (a === "sweep") await cmdSweep([]);
       else if (a === "auto") {
-        const { m } = await P({ type: "number", name: "m", message: "Intervalle en minutes (aléatoire) ?", initial: 15, min: 1, max: 720 });
+        const { m } = await P({ type: "number", name: "m", message: "Interval in minutes (randomized)?", initial: 15, min: 1, max: 720 });
         await cmdAuto([String(m)]);
       }
       else if (a === "swap") await cmdSwap([]);
@@ -3134,12 +3134,17 @@ async function simpleMenu() {
       else if (a === "adv") { await advancedMenu(true); }
     } catch (e) { console.log(c.err(`\n✗ ${e.message}`)); }
     snap = null;
-    await P({ type: "text", name: "_", message: c.dim("— Entrée —") });
+    await P({ type: "text", name: "_", message: c.dim("— Enter —") });
     lastActive = Date.now();
     console.clear();
   }
 }
 
+async function cmdOverview() {
+  const snap = await dashboardSnapshot();
+  banner();
+  renderDashboard(snap);
+}
 async function securityMenu() {
   while (true) {
     const { a } = await P({
@@ -3170,7 +3175,7 @@ async function securityMenu() {
       else if (a === "restore") await cmdRestore([(await P({ type: "text", name: "f", message: "Backup file path:" })).f]);
       else if (a === "rawkey") await cmdExportKey([]);
       if (a === "rseed") {
-        console.log(c.warn("\n⚠  This seed controls ALL receiving wallets (funds waiting to be forwarded):"));
+        console.log(c.warn("\n!  This seed controls ALL receiving wallets (funds waiting to be forwarded):"));
         if (await confirm("Reveal?")) console.log(c.bold(`\n  ${settings().seeds.receive}\n`));
       } else if (a === "mseed") {
         const m = mainEvm();
@@ -3224,7 +3229,7 @@ async function cmdRestore(args) {
   const profiles = probe.profiles ? Object.values(probe.profiles) : [probe];
   const nEvm = profiles.reduce((s2, p) => s2 + (p.wallets?.length || 0), 0);
   const nBtc = profiles.reduce((s2, p) => s2 + (p.btcWallets?.length || 0), 0);
-  console.log(c.warn(`\n⚠  Restoring will REPLACE the current vault (${nEvm} EVM + ${nBtc} BTC wallets in the backup).`));
+  console.log(c.warn(`\n!  Restoring will REPLACE the current vault (${nEvm} EVM + ${nBtc} BTC wallets in the backup).`));
   if (fs.existsSync(VAULT_FILE)) {
     const keep = await confirm("Keep a safety copy of the current vault first? (recommended)");
     if (keep) {
@@ -3245,7 +3250,7 @@ async function cmdExportKey(args) {
   const i = findWallet(a);
   if (i < 0) throw new Error(`Wallet not found: "${a}"`);
   if (!W()[i].privateKey) throw new Error(`#${i} holds no key (watch-only/Ledger).`);
-  console.log(c.err(`\n⚠  The PRIVATE KEY of #${i} ${W()[i].label} gives FULL access to its funds — no password, no delay.`));
+  console.log(c.err(`\n!  The PRIVATE KEY of #${i} ${W()[i].label} gives FULL access to its funds — no password, no delay.`));
   if (!(await confirm("I understand — reveal it anyway"))) return console.log("Cancelled.");
   console.log(c.bold(`\n  ${W()[i].privateKey}\n`));
   if (!state.autoYes) {
@@ -3254,32 +3259,32 @@ async function cmdExportKey(args) {
   }
 }
 async function cmdPrivacy() {
-  header("TRAÇABILITÉ — CE QUI TE RELIE");
+  header("TRACEABILITY — WHAT LINKS YOU");
   const s = settings();
   const proxy = PROXY || envProxy();
-  const mode = (s.privacy?.broadcast || "auto") === "rpc" ? "RPC public" : "privée (ETH)";
+  const mode = (s.privacy?.broadcast || "auto") === "rpc" ? "public RPC" : "private (ETH)";
   const used = [...receivingEvm(), ...receivingBtc()].filter(w => w.usedAt).length;
   const ok = (label, good) => good ? c.ok(label) : c.warn(label);
-  table(["COUCHE", "ÉTAT", "VERDICT"], [
-    ["Tunnel réseau", proxy || "aucun", proxy ? c.ok("protégé") : c.err("IP EXPOSÉE")],
-    ["Proxy requis", netConfig()?.requireProxy ? "oui" : "non", netConfig()?.requireProxy ? c.ok("strict") : c.warn("à activer")],
-    ["VPN gate", s.vpnCheck !== false ? "on" : "off", ok(s.vpnCheck !== false ? "ok" : "désactivé", s.vpnCheck !== false)],
-    ["Rotation RPC", s.privacy?.rpcRotation !== false ? "on" : "off", ok(s.privacy?.rpcRotation !== false ? "ok" : "désactivée", s.privacy?.rpcRotation !== false)],
-    ["Jitter requêtes", s.privacy?.queryJitter ? "on" : "off", ok(s.privacy?.queryJitter ? "ok" : "à activer", !!s.privacy?.queryJitter)],
-    ["RPC perso", Object.keys(s.rpc).length ? `${Object.keys(s.rpc).length} chaîne(s)` : "aucun", ok(Object.keys(s.rpc).length ? "ok" : "à configurer", Object.keys(s.rpc).length > 0)],
-    ["Diffusion", mode, ok(!mode.startsWith("RPC") ? "privée" : "publique", !mode.startsWith("RPC"))],
-    ["BTC API", s.btcApi || "Blockstream (public)", ok(s.btcApi ? "perso" : "public", !!s.btcApi)],
-    ["Prix", s.prices ? "on (CoinGecko)" : "off", ok(s.prices ? "fuite" : "privé", !s.prices)],
-    ["Adresses usagées", String(used), used ? c.warn("ne pas réutiliser") : c.ok("aucune")],
-    ["Clearnet send", s.privacy?.allowClearnetSend ? "AUTORISÉ" : "bloqué", ok(s.privacy?.allowClearnetSend ? "risque" : "ok", !s.privacy?.allowClearnetSend)],
+  table(["LAYER", "STATE", "VERDICT"], [
+    ["Network tunnel", proxy || "none", proxy ? c.ok("protected") : c.err("IP EXPOSED")],
+    ["Proxy required", netConfig()?.requireProxy ? "yes" : "no", netConfig()?.requireProxy ? c.ok("strict") : c.warn("enable it")],
+    ["VPN gate", s.vpnCheck !== false ? "on" : "off", ok(s.vpnCheck !== false ? "ok" : "disabled", s.vpnCheck !== false)],
+    ["RPC rotation", s.privacy?.rpcRotation !== false ? "on" : "off", ok(s.privacy?.rpcRotation !== false ? "ok" : "disabled", s.privacy?.rpcRotation !== false)],
+    ["Query jitter", s.privacy?.queryJitter ? "on" : "off", ok(s.privacy?.queryJitter ? "ok" : "enable it", !!s.privacy?.queryJitter)],
+    ["Custom RPC", Object.keys(s.rpc).length ? `${Object.keys(s.rpc).length} chain(s)` : "none", ok(Object.keys(s.rpc).length ? "ok" : "set it up", Object.keys(s.rpc).length > 0)],
+    ["Broadcast", mode, ok(mode.startsWith("private") ? "private" : "public", mode.startsWith("private"))],
+    ["BTC API", s.btcApi || "Blockstream (public)", ok(s.btcApi ? "custom" : "public", !!s.btcApi)],
+    ["Prices", s.prices ? "on (CoinGecko)" : "off", ok(s.prices ? "leak" : "private", !s.prices)],
+    ["Used addresses", String(used), used ? c.warn("do not reuse") : c.ok("none")],
+    ["Clearnet send", s.privacy?.allowClearnetSend ? "ALLOWED" : "blocked", ok(s.privacy?.allowClearnetSend ? "risk" : "ok", !s.privacy?.allowClearnetSend)],
   ]);
-  box("RÉDUIRE LA TRAÇABILITÉ — 4 GESTES", [
-    c.ok("1.") + " Tunnel d'abord :  ravenne proxy http://127.0.0.1:8118",
-    c.ok("2.") + " Une adresse par paiement :  ravenne temp 24h",
-    c.ok("3.") + " Jamais payer depuis une réception :  sweep → main → dépense",
-    c.ok("4.") + " Ton propre RPC / BTC API / daemon XMR si tu peux",
+  box("REDUCE TRACEABILITY — 4 MOVES", [
+    c.ok("1.") + " Tunnel first:  ravenne proxy http://127.0.0.1:8118",
+    c.ok("2.") + " One address per payment:  ravenne temp 24h",
+    c.ok("3.") + " Never spend from a receiving address:  sweep → MAIN → spend",
+    c.ok("4.") + " Your own RPC / BTC API / XMR daemon when possible",
     "",
-    c.soft("Checklist complète : ravenne check · ENVOIS bloqués sans tunnel."),
+    c.soft("Full checklist: ravenne check · sends blocked without a tunnel."),
   ]);
 }
 async function cmdCheck() {
@@ -3322,12 +3327,12 @@ async function quickSettings() {
         description: "If adapters cannot be inspected, BLOCK instead of assuming you are protected." },
       { title: `Require proxy: ${netConfig()?.requireProxy ? "ON" : "OFF"}`, value: "reqproxy",
         description: "Refuse to start without an HTTP proxy (Tor/Privoxy/VPN box). Fail closed." },
-      { title: `Diffusion: ${(s.privacy?.broadcast || "auto") === "rpc" ? "RPC public" : "privée (Flashbots)"}`, value: "bcast",
-        description: "Privée = la transaction ne passe pas par le mempool public (Ethereum)." },
-      { title: `Envois sans tunnel: ${s.privacy?.allowClearnetSend ? "AUTORISÉS" : "bloqués"}`, value: "clearnet",
-        description: "Bloqué = refuse d'envoyer tant qu'aucun proxy/Tor n'est actif." },
-      { title: `BTC API: ${s.btcApi ? "la tienne" : "Blockstream public"}`, value: "btcapi",
-        description: "Pointer sur ton propre Esplora/mempool pour ne pas donner toutes tes adresses à un tiers." },
+      { title: `Broadcast: ${(s.privacy?.broadcast || "auto") === "rpc" ? "public RPC" : "private (Flashbots)"}`, value: "bcast",
+        description: "Private = the transaction never touches the public mempool (Ethereum)." },
+      { title: `Clearnet sends: ${s.privacy?.allowClearnetSend ? "ALLOWED" : "blocked"}`, value: "clearnet",
+        description: "Blocked = refuses to send while no proxy/Tor is active." },
+      { title: `BTC API: ${s.btcApi ? "custom" : "Blockstream public"}`, value: "btcapi",
+        description: "Point to your own Esplora/mempool so one third party doesn't see all your addresses." },
       { title: `Mesh VPN counts as VPN: ${s.meshVpnOk ? "YES" : "NO"}`, value: "mesh",
         description: "Let Radmin/Hamachi/ZeroTier-style LAN VPNs satisfy the check. They do NOT hide your traffic." },
       { title: `Price lookups: ${s.prices ? "ON" : "OFF"}`, value: "prices",
@@ -3357,14 +3362,14 @@ async function quickSettings() {
       if (a === "bcast") {
         const next = (s.privacy?.broadcast || "auto") === "rpc" ? "private" : "rpc";
         (s.privacy ??= {}).broadcast = next; save();
-        console.log(c.ok(next === "rpc" ? "✓ Diffusion RPC public" : "✓ Diffusion privée (Flashbots, ETH)"));
+        console.log(c.ok(next === "rpc" ? "✓ Public RPC broadcast" : "✓ Private broadcast (Flashbots, ETH)"));
       }
       if (a === "clearnet") {
         (s.privacy ??= {}).allowClearnetSend = !s.privacy.allowClearnetSend; save();
-        console.log(c.ok(`✓ Envois sans tunnel ${s.privacy.allowClearnetSend ? "AUTORISÉS" : "bloqués"}`));
+        console.log(c.ok(`✓ Clearnet sends ${s.privacy.allowClearnetSend ? "ALLOWED" : "blocked"}`));
       }
       if (a === "btcapi") {
-        const { u } = await P({ type: "text", name: "u", message: "Esplora URL (vide = Blockstream public) :" });
+        const { u } = await P({ type: "text", name: "u", message: "Esplora URL (empty = Blockstream public):" });
         if (!u) { delete s.btcApi; save(); console.log(c.ok("✓ BTC API → Blockstream public")); }
         else { s.btcApi = String(u).trim().replace(/\/$/, ""); save(); console.log(c.ok(`✓ BTC API : ${s.btcApi}`)); }
       }
@@ -3422,7 +3427,7 @@ async function cmdUsb(args) {
       const e = newWalletEntry(24);
       e.label = "usb-main"; e.role = "usb-main";
       wallets = [e];
-      console.log(c.warn("\n⚠  24-word seed of the USB wallet — shown ONCE:"));
+      console.log(c.warn("\n!  24-word seed of the USB wallet — shown ONCE:"));
       if (await confirm("Reveal it now?")) console.log(c.bold(`\n  ${e.phrase}\n`));
       else console.log(c.dim("  (the key is inside the encrypted file; keep a phrase backup anyway)"));
     } else wallets = [{ ...W()[+choice] }];
@@ -3556,7 +3561,7 @@ async function xmrNewEntry(role = "receive") {
   const NETC = settings().xmrStage ? m.MoneroNetworkType.STAGENET : m.MoneroNetworkType.MAINNET;
   const w = await m.MoneroWalletKeys.createWallet({ networkType: NETC, language: "English" });
   let restoreHeight = 0;
-  try { restoreHeight = Math.max(0, (await xmrDaemonHeight()) - 100); } catch { console.log(c.warn("  ⚠ daemon unreachable — restore height 0 (first sync will be slow)")); }
+  try { restoreHeight = Math.max(0, (await xmrDaemonHeight()) - 100); } catch { console.log(c.warn("  ! daemon unreachable — restore height 0 (first sync will be slow)")); }
   const n = XW().filter(x => x.role === "receive").length;
   return { label: role === "main" ? "xmr-main" : `xmr-in-${n + 1}`, role,
            address: await w.getPrimaryAddress(), viewKey: await w.getPrivateViewKey(),
@@ -3578,7 +3583,7 @@ async function cmdXmr(args) {
       created.map((w, i) => [`#${XW().length - created.length + i}`, w.label, w.role, w.address]));
     const main = created.find(x => x.role === "main");
     if (main) {
-      console.log(c.warn(`\n⚠  The FIRST wallet is your Monero MAIN — backup this 25-word seed on paper:`));
+      console.log(c.warn(`\n!  The FIRST wallet is your Monero MAIN — backup this 25-word seed on paper:`));
       if (!state.autoYes) {
         if (await confirm("Reveal it now?")) console.log(c.bold(`\n  ${main.seed}\n`));
         await P({ type: "text", name: "_", message: c.dim("Press Enter to clear the screen…") });
@@ -3612,7 +3617,7 @@ async function cmdXmr(args) {
   }
   if (sub === "balance") return cmdXmr(["list"]);
   if (sub === "send") {
-    if (!(await clearnetSendGuard("l'envoi Monero"))) return console.log("Annulé — aucun tunnel réseau.");
+    if (!(await clearnetSendGuard("the Monero send"))) return console.log("Cancelled — no network tunnel.");
     await xmrRequireEngine();
     let [fromA, toA, amtA] = [args[1], args[2], args[3]];
     if (fromA == null || toA == null || amtA == null) {
@@ -3653,7 +3658,7 @@ async function cmdXmr(args) {
     return;
   }
   if (sub === "forward") {
-    if (!(await clearnetSendGuard("le transfert XMR"))) return console.log("Annulé — aucun tunnel réseau.");
+    if (!(await clearnetSendGuard("the XMR transfer"))) return console.log("Cancelled — no network tunnel.");
     await xmrRequireEngine();
     const main = XW().find(w => w.role === "main");
     if (!main) throw new Error("No XMR main — xmr create first.");
@@ -3673,9 +3678,9 @@ async function cmdXmr(args) {
             amount: fmtXmr(bal.unlocked_balance), fee: fmtXmr(res.fee_list?.[0] ?? 0), hash: h }));
         save(); done++;
         console.log(c.ok(`   ✓ forwarded (tx ${(Array.isArray(res.tx_hash_list) ? res.tx_hash_list[0] : res.tx_hash)?.slice(0, 16)}…)`));
-      } catch (e) { console.log(c.warn(`  ⚠ ${w.label}: ${e.message.slice(0, 60)}`)); }
+      } catch (e) { console.log(c.warn(`  ! ${w.label}: ${e.message.slice(0, 60)}`)); }
     }
-    return done ? console.log(c.ok(`\n✅ ${done} XMR wallet${done > 1 ? "s" : ""} forwarded to xmr-main.`))
+    return done ? console.log(c.ok(`\n ${done} XMR wallet${done > 1 ? "s" : ""} forwarded to xmr-main.`))
                 : console.log(c.dim("\nNothing to forward (all dust/empty)."));
   }
   if (sub === "watch") {
@@ -3698,7 +3703,7 @@ async function cmdXmr(args) {
     if (i < 0) throw new Error(`XMR wallet not found.`);
     const w = XW()[i];
     if (!w.seed) return console.log(c.warn("Watch-only wallet — no seed stored."));
-    console.log(c.warn(`\n⚠  Monero seed of #${i} ${w.label} — never show this to anyone:`));
+    console.log(c.warn(`\n!  Monero seed of #${i} ${w.label} — never show this to anyone:`));
     if (!(await confirm("Reveal anyway?"))) return console.log("Cancelled.");
     console.log(c.bold(`\n  ${w.seed}\n`));
     if (!state.autoYes) { await P({ type: "text", name: "_", message: c.dim("Press Enter to clear the screen…") }); console.clear(); }
@@ -3732,7 +3737,7 @@ async function cmdXmr(args) {
       zip], { cwd: XMR_DIR, stdio: "ignore", windowsHide: true });
     fs.unlinkSync(zip);
     console.log(c.ok(`✓ monero-wallet-rpc installed: ${exe}`));
-    console.log(c.warn(`\n⚠  Windows Defender often flags the OFFICIAL Monero binary as a false positive`));
+    console.log(c.warn(`\n!  Windows Defender often flags the OFFICIAL Monero binary as a false positive`));
     console.log(c.warn(`   (PUA/CryptoMiner heuristics). If the file disappears, restore it from Defender`));
     console.log(c.warn(`   protection history and add "${XMR_DIR}" to exclusions. The SHA-256 was verified`));
     console.log(c.warn(`   against getmonero.org — the binary is authentic. Verify yourself if unsure.`));
@@ -3742,7 +3747,7 @@ async function cmdXmr(args) {
   if (sub === "engine") {
     const exe = path.join(XMR_DIR, "monero-wallet-rpc.exe");
     if (!fs.existsSync(exe)) throw new Error("Engine not installed — ravenne xmr install (or 'xmr connect' to a remote one).");
-    console.log(c.warn(`\n⚠  The remote daemon (${XMR_DAEMON()}) sees your wallet requests.`));
+    console.log(c.warn(`\n!  The remote daemon (${XMR_DAEMON()}) sees your wallet requests.`));
     console.log(c.dim("   For stronger anonymity route through Tor/Privoxy first: ravenne proxy http://127.0.0.1:8118"));
     const auth = `${crypto.randomBytes(6).toString("hex")}:${crypto.randomBytes(8).toString("hex")}`;
     settings().xmrRpcAuth = auth; save();
@@ -3764,7 +3769,7 @@ async function cmdXmr(args) {
     settings().xmrRpc = url;
     settings().xmrRpcAuth = args[2] || null; save();
     try { await xmrRpcCall("get_version"); console.log(c.ok(`✓ Connected to wallet engine at ${url}`)); }
-    catch { console.log(c.warn(`⚠ Saved ${url} — but no engine answered yet.`)); }
+    catch { console.log(c.warn(`! Saved ${url} — but no engine answered yet.`)); }
     return;
   }
   if (sub === "node") {
@@ -3775,7 +3780,7 @@ async function cmdXmr(args) {
     try {
       const h = await xmrDaemonHeight();
       console.log(c.ok(`✓ Remote daemon: ${url} (height ${h})`));
-    } catch { console.log(c.warn(`⚠ Saved ${url} — but it did not answer get_info.`)); }
+    } catch { console.log(c.warn(`! Saved ${url} — but it did not answer get_info.`)); }
     return;
   }
   if (sub === "network") {
@@ -3823,7 +3828,7 @@ async function execSwap(idx, from, to, amountIn) {
   if (from.native) {
     if (priv) {
       const req = await routerC.swapExactETHForTokens.populateTransaction(outMin, swapPath, W()[idx].address, deadline, { value: amountIn });
-      const h = await spin("Diffusion privée (swap)…", () => flashbotsBroadcast(signer, req));
+      const h = await spin("Private broadcast (swap)…", () => flashbotsBroadcast(signer, req));
       rc = await waitHash(h, provider());
     } else {
       tx = await spin("Swapping ETH → token…", () => routerC.swapExactETHForTokens(outMin, swapPath, W()[idx].address, deadline, { value: amountIn }));
@@ -3834,7 +3839,7 @@ async function execSwap(idx, from, to, amountIn) {
     if ((await erc.allowance(W()[idx].address, V2.router)) < amountIn) {
       if (priv) {
         const req = await erc.approve.populateTransaction(V2.router, amountIn);
-        const h = await spin("Diffusion privée (approve)…", () => flashbotsBroadcast(signer, req));
+        const h = await spin("Private broadcast (approve)…", () => flashbotsBroadcast(signer, req));
         await waitHash(h, provider());
       } else {
         const ap = await spin("Approving token spend…", () => erc.approve(V2.router, amountIn));
@@ -3844,7 +3849,7 @@ async function execSwap(idx, from, to, amountIn) {
     const call = to.native ? "swapExactTokensForETH" : "swapExactTokensForTokens";
     if (priv) {
       const req = await routerC[call].populateTransaction(amountIn, outMin, swapPath, W()[idx].address, deadline);
-      const h = await spin("Diffusion privée (swap)…", () => flashbotsBroadcast(signer, req));
+      const h = await spin("Private broadcast (swap)…", () => flashbotsBroadcast(signer, req));
       rc = await waitHash(h, provider());
     } else {
       tx = to.native
@@ -3915,7 +3920,7 @@ async function cmdSwap(args) {
     if (idx < 0) throw new Error("No wallet with a key to sign — create one first: ravenne create");
   }
   requireKey(idx);
-  if (!(await clearnetSendGuard("le swap"))) return console.log("Annulé — aucun tunnel réseau.");
+  if (!(await clearnetSendGuard("the swap"))) return console.log("Cancelled — no network tunnel.");
   if (!from.native && from.dec == null) from.dec = Number(await new Contract(from.addr, ERC20_ABI, provider()).decimals());
   if (!to.native && to.dec == null) to.dec = Number(await new Contract(to.addr, ERC20_ABI, provider()).decimals());
 
@@ -3999,7 +4004,7 @@ const MENU_TITLES = {
   settings: "Settings (prices, VPN check, auto-lock)", changepass: "Change master password",
   twofa: "2FA (TOTP local - authenticator app)", duress: "Duress wallet (decoy vault)",
   tor: "Route traffic through local Tor",
-  privacy: "Traçabilité — tunnel, diffusion, adresses",
+  privacy: "Traceability — tunnel, broadcast, addresses",
   proxy: "Persistent HTTP proxy (Tor/Privoxy/VPN box)",
   usbbackup: "USB backup (1-command, all sensitive files)", usbrestore: "Restore from USB backup",
   lock: "Lock session", wipe: "Wipe vault",
@@ -4043,7 +4048,7 @@ async function advancedMenu(fromHome = false) {
   };
   const SUB_DESC = {
     profile: "Several named wallets, one active at a time - pick at launch.",
-    privacy: "Tunnel réseau, diffusion privée, adresses réutilisées — ce qui te relie.",
+    privacy: "Network tunnel, private broadcast, reused addresses — what links you.",
     temp: "Burner receiving address: forwards to main at expiry, then keys are erased.",
     dashboard: "One-screen overview: totals, top wallets, recent activity.",
     list: "Every wallet with its balance on the active chain (or all chains).",
@@ -4109,7 +4114,7 @@ async function advancedMenu(fromHome = false) {
       type: "select", name: "cat", message: "Main menu:",
       choices: [...Object.keys(MENU).map(t => ({ title: t, value: t, description: CAT_DESC[t] })),
                 fromHome
-                  ? { title: "←  Menu principal", value: "__home", description: "Retour au tableau de bord." }
+                  ? { title: "Back to main menu", value: "__home", description: "Return to the dashboard." }
                   : { title: "Quit", value: "__quit", description: "Clear the screen and exit." }],
     });
     lastActive = Date.now();
@@ -4128,7 +4133,7 @@ async function advancedMenu(fromHome = false) {
       await P({ type: "text", name: "_", message: c.dim("— Enter to continue —") });
       lastActive = Date.now();
       console.clear();
-      console.log(centerLine(c.accent("◆") + " " + c.bold(c.wht("RAVENNE")) + c.soft(`  ·  ${cat}`)));
+      console.log(centerLine(c.bold(c.wht("RAVENNE")) + c.soft(`  ·  ${cat}`)));
       console.log(centerLine(pillsLine()) + "\n");
     }
   }
@@ -4183,7 +4188,7 @@ MAINTENANCE
   restore <file>               Restore the vault from a backup
   export-key <n°>              Reveal a wallet's raw private key (careful!)
   check                        Diagnostics: VPN, proxy, RPC, privacy score
-  privacy                      Traçabilité: tunnel, diffusion, adresses usées
+  privacy                      Traceability: tunnel, broadcast, used addresses
   settings                     + broadcast · allowclearnet · btcapi
   settings                     + meshvpn · sweepfee · rotation · jitter · failclosed
   wipe [all]                   Erase the active vault (or ALL local data)
@@ -4234,6 +4239,7 @@ Address book
   book · book add <label> <0x…> · book remove <label>   (labels = send targets)
 
 Insight
+  overview                     one-screen dashboard (balances + network state)
   dashboard · balance [--all] · stats [--all] · price
   history                      Sent + synced transactions (IN/OUT/SELF)
   sync                         Fetch incoming txs from explorer APIs
@@ -4271,7 +4277,7 @@ No command → interactive menu.`;
 
 const ROUTES = {
   create: cmdCreate, import: cmdImport, watch: cmdWatch, ledger: cmdLedger,
-  list: cmdList, dashboard: cmdDashboard, home: cmdDashboard, balance: cmdBalance,
+  list: cmdList, dashboard: cmdDashboard, home: cmdDashboard, overview: cmdOverview, balance: cmdBalance,
   send: cmdSend, split: cmdSplit, consolidate: cmdConsolidate, tokens: cmdTokens,
   book: cmdBook, stats: cmdStats, history: cmdHistory, sync: cmdSync,
   "export-csv": cmdCsv, csv: cmdCsv, qr: cmdQr, phrase: cmdPhrase, export: cmdExport,
