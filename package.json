@@ -1,6 +1,6 @@
 {
   "name": "ravenne-wallet",
-  "version": "9.6.0",
+  "version": "9.7.0",
   "description": "Encrypted, 100% local terminal wallet — EVM chains, Bitcoin and Monero. No server, no telemetry.",
   "main": "ravenne.js",
   "bin": { "ravenne": "ravenne.js" },

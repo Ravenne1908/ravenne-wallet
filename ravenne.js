@@ -26,7 +26,7 @@ import { HDKey } from "@scure/bip32";
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
-const VERSION = "9.6.0";
+const VERSION = "9.7.0";
 process.title = "Ravenne Wallet";
 
 /* Network-layer privacy: route ALL outgoing HTTP (RPC, explorers, prices)
@@ -295,10 +295,22 @@ const confirm = async msg =>
 /* ─────────── UI ─────────── */
 const MARGIN = "  ";
 const stripA = s => s.replace(/\x1b\[[0-9;]*m/g, "");
-const termW = () => (TTY && process.stdout.columns) || 0;
+const termW = () => {
+  const forced = parseInt(process.env.RAVENNE_COLS || "", 10);
+  if (Number.isFinite(forced) && forced >= 30) return forced;
+  return Math.max(40, (TTY && process.stdout.columns) || 80);
+};
+const availW = () => Math.max(30, termW() - MARGIN.length * 2);
 const centerLine = s => MARGIN + s;                 // left margin, consistent everywhere
 const shift = lines => lines.map(l => MARGIN + l);
-const hrule = (n = 60) => c.soft("─".repeat(n));
+const hrule = (n = 60) => c.soft("─".repeat(Math.max(6, Math.min(n, availW()))));
+const fit = (s, w) => {
+  const vis = stripA(s);
+  if (vis.length <= w) return s;
+  if (w <= 1) return "…";
+  const keep = w - 1, head = Math.ceil(keep * 0.6), tail = keep - head;
+  return vis.slice(0, head) + "…" + vis.slice(-tail);
+};
 
 function banner() {
   if (TTY) console.clear();
@@ -313,13 +325,13 @@ function banner() {
 
 function header(title) {
   console.log("");
-  console.log(MARGIN + c.bold(title));
-  console.log(MARGIN + hrule(Math.min(60, Math.max(24, title.length + 6))));
+  console.log(MARGIN + c.bold(fit(title, availW())));
+  console.log(MARGIN + hrule(Math.min(60, Math.max(24, stripA(title).length + 6))));
 }
 
 /* Clean label/value panel: no borders, aligned columns. */
 function panel(title, rows) {
-  const lw = Math.max(4, ...rows.map(r => String(r[0]).length));
+  const lw = Math.max(4, ...rows.map(r => stripA(String(r[0])).length));
   console.log("");
   console.log(MARGIN + c.soft(title));
   for (const [label, value, note] of rows) {
@@ -328,8 +340,18 @@ function panel(title, rows) {
   }
 }
 
+function notice(title, lines) {
+  console.log("");
+  console.log(MARGIN + c.bold(title));
+  for (const l of lines) console.log(MARGIN + l);
+  console.log("");
+}
+
 function box(title, lines) {
-  const W = Math.max(title.length + 4, ...lines.map(l => stripA(l).length + 2), 24);
+  const natural = Math.max(title.length + 4, ...lines.map(l => stripA(l).length + 2), 24);
+  const A = availW();
+  if (natural > A) return notice(title, lines);   // too narrow: drop the frame, keep the text
+  const W = natural;
   const top = "┌─ " + c.bold(title) + " " +
               c.soft("─".repeat(Math.max(0, W - title.length - 3))) + "┐";
   console.log(MARGIN + top);
@@ -340,17 +362,47 @@ function box(title, lines) {
   console.log(MARGIN + "└" + c.soft("─".repeat(W)) + "┘");
 }
 
-/* Borderless table: header, rule, rows. */
+/* Borderless table. Shrinks columns to the terminal width; if that would
+   destroy too much, falls back to a stacked "header: value" view. */
 function table(headers, rows, opts = {}) {
+  if (!rows.length) { console.log(MARGIN + c.soft("no entries")); return; }
   const aligns = opts.align || [];
+  const n = headers.length, gap = 2, A = availW();
   const widths = headers.map((h, i) => Math.max(stripA(String(h)).length,
     ...rows.map(r => stripA(String(r[i] ?? "")).length)));
+  const natural = [...widths];
+  const minW = Math.max(4, Math.min(10, Math.floor((A - gap * (n - 1)) / n)));
+
+  let guard = 2000;
+  while (widths.reduce((a, b) => a + b, 0) + gap * (n - 1) > A && guard-- > 0) {
+    let idx = -1, max = -1;
+    for (let i = 0; i < n; i++) if (widths[i] > minW && widths[i] > max) { max = widths[i]; idx = i; }
+    if (idx < 0) break;
+    widths[idx]--;
+  }
+
+  const total = widths.reduce((a, b) => a + b, 0) + gap * (n - 1);
+  const truncated = widths.some((w, i) => w < natural[i]);
+  /* Narrow terminal + truncation would hide data: show everything stacked. */
+  if (total > A || (A < 72 && truncated)) {
+    const hw = Math.min(16, Math.max(4, ...headers.slice(1).map(h => stripA(String(h)).length)));
+    for (const r of rows) {
+      console.log(MARGIN + c.bold(String(r[0] ?? "")));
+      for (let i = 1; i < n; i++) {
+        const v = String(r[i] ?? "");
+        if (!v) continue;
+        console.log(MARGIN + "  " + c.soft(String(headers[i]).padEnd(hw)) + "  " + v);
+      }
+      console.log("");
+    }
+    return;
+  }
+
   const line = cells => cells.map((cell, i) => {
-    const s = String(cell ?? "");
+    const s = fit(String(cell ?? ""), widths[i]);
     const pad = " ".repeat(Math.max(0, widths[i] - stripA(s).length));
     return aligns[i] === "r" ? pad + s : s + pad;
   }).join("  ");
-  if (!rows.length) { console.log(MARGIN + c.soft("no entries")); return; }
   console.log(MARGIN + c.bold(line(headers)));
   console.log(MARGIN + c.soft(widths.map(w => "─".repeat(w)).join("  ")));
   for (const r of rows) console.log(MARGIN + line(r));
@@ -3537,18 +3589,30 @@ async function quickSettings() {
   const s = settings();
   while (true) {
     const { a } = await P({ type: "select", name: "a", message: "Settings:", choices: [
+      { title: `Proxy: ${PROXY || "none"}`, value: "proxyurl",
+        description: "Set the HTTP proxy used for ALL traffic (Tor/Privoxy/VPN box)." },
+      { title: "Test proxy connection", value: "proxytest",
+        description: "Send one request through the configured proxy and report success." },
+      { title: "Auto-detect local Tor/Privoxy", value: "tor",
+        description: "Probe 8118/9050/9150 and enable the HTTP proxy if found." },
+      { title: `Require proxy: ${netConfig()?.requireProxy ? "ON" : "OFF"}`, value: "reqproxy",
+        description: "Refuse to start without an HTTP proxy (Tor/Privoxy/VPN box). Fail closed." },
+      { title: "Harden privacy profile", value: "harden",
+        description: "Apply proxy/jitter/rotation/private tx/clearnet-off in one pass." },
       { title: `VPN check: ${s.vpnCheck ? "ON" : "OFF"}`, value: "vpn",
         description: "Refuse to connect without an active anonymity VPN (WireGuard, Proton, Nord…)." },
       { title: `VPN fail-closed: ${s.vpnFailClosed !== false ? "ON" : "OFF"}`, value: "failclosed",
         description: "If adapters cannot be inspected, BLOCK instead of assuming you are protected." },
-      { title: `Require proxy: ${netConfig()?.requireProxy ? "ON" : "OFF"}`, value: "reqproxy",
-        description: "Refuse to start without an HTTP proxy (Tor/Privoxy/VPN box). Fail closed." },
       { title: `Broadcast: ${(s.privacy?.broadcast || "auto") === "rpc" ? "public RPC" : "private (ETH)"}`, value: "bcast",
         description: "Private = sent through Flashbots/MEV Blocker, never the public mempool." },
       { title: `Clearnet sends: ${s.privacy?.allowClearnetSend ? "ALLOWED" : "blocked"}`, value: "clearnet",
         description: "Blocked = refuses to send while no proxy/Tor is active." },
       { title: `BTC API: ${s.btcApi ? "custom" : "Blockstream public"}`, value: "btcapi",
         description: "Point to your own Esplora/mempool so one third party doesn't see all your addresses." },
+      { title: `Monero daemon: ${s.xmrDaemon || "default (clearnet)"}`, value: "xmrnode",
+        description: "Use your own monerod instead of the public default." },
+      { title: `Custom RPC: ${Object.keys(s.rpc).length} chain(s)`, value: "rpc",
+        description: "Point a chain at your own node (IP privacy)." },
       { title: `Mesh VPN counts as VPN: ${s.meshVpnOk ? "YES" : "NO"}`, value: "mesh",
         description: "Let Radmin/Hamachi/ZeroTier-style LAN VPNs satisfy the check. They do NOT hide your traffic." },
       { title: `Price lookups: ${s.prices ? "ON" : "OFF"}`, value: "prices",
@@ -3567,6 +3631,54 @@ async function quickSettings() {
     ]});
     if (a === "back") return;
     try {
+      if (a === "proxyurl") {
+        const { u } = await P({ type: "text", name: "u", initial: PROXY || "",
+          message: "Proxy URL (http://127.0.0.1:8118 — empty = clear):" });
+        if (!u) {
+          await applyProxy(null);
+          console.log(c.ok("✓ Proxy cleared."));
+        } else if (!/^https?:\/\//.test(String(u).trim())) {
+          console.log(c.err("✗ Proxy URL must start with http:// or https://"));
+        } else {
+          await applyProxy(String(u).trim());
+          const ok = await spin("Testing proxy…", async () => {
+            const r = await fetch("https://example.com", { signal: AbortSignal.timeout(8000) });
+            return r.ok;
+          }).catch(() => false);
+          console.log(ok ? c.ok("✓ Proxy saved and working.") : c.warn("✓ Proxy saved — but the test failed (is Tor/Privoxy running?)."));
+        }
+      }
+      if (a === "proxytest") {
+        if (!PROXY) { console.log(c.warn("No proxy configured.")); }
+        else {
+          const ok = await spin("Testing proxy…", async () => {
+            const r = await fetch("https://example.com", { signal: AbortSignal.timeout(8000) });
+            return r.ok;
+          }).catch(() => false);
+          console.log(ok ? c.ok("✓ Proxy works.") : c.err("✗ Proxy test failed."));
+        }
+      }
+      if (a === "tor") await cmdTor([]);
+      if (a === "harden") await cmdHarden();
+      if (a === "xmrnode") {
+        const { u } = await P({ type: "text", name: "u", initial: s.xmrDaemon || "",
+          message: "monerod URL (empty = default public node):" });
+        if (!u) { delete s.xmrDaemon; save(); console.log(c.ok("✓ XMR daemon → default")); }
+        else {
+          s.xmrDaemon = String(u).trim().replace(/\/json_rpc\/?$/, ""); save();
+          const h = await spin("Testing daemon…", () => xmrDaemonHeight()).catch(() => null);
+          console.log(h ? c.ok(`✓ XMR daemon reachable (height ${h})`) : c.warn("✓ Saved — daemon did not answer yet."));
+        }
+      }
+      if (a === "rpc") {
+        const { k } = await P({ type: "select", name: "k", message: "Which chain?",
+          choices: Object.keys(NET).map(x => ({ title: NET[x].label, value: x })) });
+        const { u } = await P({ type: "text", name: "u", initial: s.rpc[k] || "",
+          message: "RPC URL (empty = reset to default):" });
+        if (!u) { delete s.rpc[k]; save(); console.log(c.ok(`✓ ${NET[k].label} → default RPC`)); }
+        else if (!/^https?:\/\//.test(String(u).trim())) console.log(c.err("✗ RPC URL must start with http:// or https://"));
+        else { s.rpc[k] = String(u).trim(); save(); console.log(c.ok(`✓ ${NET[k].label} → ${s.rpc[k]}`)); }
+      }
       if (a === "vpn") { s.vpnCheck = !s.vpnCheck; save(); console.log(c.ok(`✓ VPN check ${s.vpnCheck ? "enabled" : "DISABLED"}`)); }
       if (a === "failclosed") { s.vpnFailClosed = s.vpnFailClosed === false ? true : false; save();
         console.log(c.ok(`✓ VPN gate fail-closed ${s.vpnFailClosed ? "ON" : "OFF"}`)); }
