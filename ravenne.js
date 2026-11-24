@@ -16,6 +16,7 @@ import qrcode from "qrcode-terminal";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { argon2id } from "@noble/hashes/argon2";
 import { exec, execFileSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -25,7 +26,7 @@ import { HDKey } from "@scure/bip32";
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
-const VERSION = "9.4.1";
+const VERSION = "9.5.0";
 process.title = "Ravenne Wallet";
 
 /* Network-layer privacy: route ALL outgoing HTTP (RPC, explorers, prices)
@@ -408,13 +409,20 @@ async function countdown(sec) {
 }
 const keyMark = w => w.privateKey ? c.ok("● key") : w.ledgerPath ? c.warn("⧉ ledger") : c.cyan("○ watch");
 
-/* ─────────── Password gate (scrypt verifier — password itself is never stored) ─────────── */
-const kdf = (pass, salt) => crypto.scryptSync(pass, salt, 32, { N: 16384, r: 8, p: 1 });
+/* ─────────── Password gate (Argon2id verifier — password never stored) ───────────
+   Legacy v7 vaults/gates used scrypt(N=16384); they are still accepted and are
+   transparently upgraded on the next successful unlock. */
+const KDF2 = { kdf: "argon2id", t: 3, m: 32768, p: 1 };
+const kdfScrypt = (pass, salt) => crypto.scryptSync(pass, salt, 32, { N: 16384, r: 8, p: 1 });
+const kdfArgon = (pass, salt, o = KDF2) =>
+  Buffer.from(argon2id(pass, salt, { t: o.t, m: o.m, p: o.p, dkLen: 32 }));
+const deriveKey = (pass, salt, meta = KDF2) =>
+  meta?.kdf === "argon2id" ? kdfArgon(pass, salt, meta) : kdfScrypt(pass, salt);
 function writeGate(pass) {
   let keep = {};
   try { const old = JSON.parse(fs.readFileSync(GATE_FILE, "utf8")); keep = { totp: old.totp, duress: old.duress }; } catch {}
   const salt = crypto.randomBytes(16);
-  const meta = { v: 1, salt: salt.toString("hex"), hash: kdf(pass, salt).toString("hex") };
+  const meta = { v: 2, ...KDF2, salt: salt.toString("hex"), hash: kdfArgon(pass, salt).toString("hex") };
   if (keep.totp) meta.totp = keep.totp;
   if (keep.duress) meta.duress = keep.duress;
   fs.writeFileSync(GATE_FILE, JSON.stringify(meta, null, 2));
@@ -425,8 +433,10 @@ function gateVerify(pass) {
   try {
     const g = JSON.parse(fs.readFileSync(GATE_FILE, "utf8"));
     const want = Buffer.from(g.hash, "hex");
-    const got = kdf(pass, Buffer.from(g.salt, "hex"));
-    return want.length === got.length && crypto.timingSafeEqual(got, want);
+    const got = deriveKey(pass, Buffer.from(g.salt, "hex"), g);
+    const ok = want.length === got.length && crypto.timingSafeEqual(got, want);
+    if (ok && g.kdf !== "argon2id") { try { writeGate(pass); } catch {} }   // silent upgrade
+    return ok;
   } catch { return false; }
 }
 async function initGate() {
@@ -605,12 +615,21 @@ function hardenFile(p) {
 }
 
 /* ---------- Encrypted vault (AES-256-GCM) ---------- */
+const PAD_BUCKET = 4096;
+/* Pad the plaintext to fixed buckets so the ciphertext length does not reveal
+   how many wallets/history entries the vault holds. */
+function paddedJson(obj) {
+  const s = JSON.stringify(obj);
+  const bytes = Buffer.byteLength(s);
+  const target = Math.max(PAD_BUCKET, Math.ceil((bytes + 128) / PAD_BUCKET) * PAD_BUCKET);
+  return s + " ".repeat(target - bytes);
+}
 export function encryptVault(payload, pass, file = VAULT_FILE) {
   const salt = crypto.randomBytes(16), iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", kdf(pass, salt), iv);
-  const data = Buffer.concat([cipher.update(JSON.stringify(payload), "utf8"), cipher.final()]);
+  const cipher = crypto.createCipheriv("aes-256-gcm", kdfArgon(pass, salt), iv);
+  const data = Buffer.concat([cipher.update(paddedJson(payload), "utf8"), cipher.final()]);
   fs.writeFileSync(file, JSON.stringify({
-    app: "ravenne", v: 7,
+    app: "ravenne", v: 8, ...KDF2,
     salt: salt.toString("hex"), iv: iv.toString("hex"),
     tag: cipher.getAuthTag().toString("hex"), data: data.toString("base64"),
   }, null, 2));
@@ -618,7 +637,8 @@ export function encryptVault(payload, pass, file = VAULT_FILE) {
 }
 export function decryptVault(pass, file = VAULT_FILE) {
   const meta = JSON.parse(fs.readFileSync(file, "utf8"));
-  const d = crypto.createDecipheriv("aes-256-gcm", kdf(pass, Buffer.from(meta.salt, "hex")), Buffer.from(meta.iv, "hex"));
+  const key = deriveKey(pass, Buffer.from(meta.salt, "hex"), meta);
+  const d = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(meta.iv, "hex"));
   d.setAuthTag(Buffer.from(meta.tag, "hex"));
   return JSON.parse(Buffer.concat([d.update(Buffer.from(meta.data, "base64")), d.final()]).toString("utf8"));
 }
@@ -942,6 +962,12 @@ async function btcFetch(pathname, body = null) {
   if (!r.ok) throw new Error(`esplora answered ${r.status}`);
   return body ? r.text() : r.json();
 }
+/* ─────────── Coin control (BTC) ─────────── */
+const utxoKey = u => `${u.txid}:${u.vout}`;
+const liveUtxos = (e, list) => {
+  const frozen = new Set(e?.frozenUtxos || []);
+  return (list || []).filter(u => !frozen.has(utxoKey(u)));
+};
 async function getBtcBalances() {
   /* Sequential with small random gaps: a parallel burst tells one server
      that all these addresses belong together. */
@@ -1016,7 +1042,33 @@ async function guardRecipient(addr) {
 /* ─────────── Diffusion privée ───────────
    Flashbots Protect : la transaction ne passe jamais par le mempool public,
    le RPC public ne voit donc pas l'origine du tx (IP ↔ adresse). ETH mainnet. */
-const FLASHBOTS_URL = "https://rpc.flashbots.net";
+/* Private relays, tried in order. No public mempool fallback: if they all
+   fail, the send fails instead of leaking the transaction to a public RPC. */
+const PRIVATE_RELAYS = [
+  "https://rpc.flashbots.net",
+  "https://rpc.mevblocker.io",
+];
+async function flashbotsBroadcast(wallet, req) {
+  const populated = (req && req.nonce != null && req.gasLimit != null && req.chainId != null)
+    ? req : await wallet.populateTransaction(req);
+  const raw = await wallet.signTransaction(populated);
+  const errors = [];
+  for (const url of PRIVATE_RELAYS) {
+    const host = url.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+    try {
+      const r = await fetch(url, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_sendRawTransaction", params: [raw] }),
+        signal: AbortSignal.timeout(20000),
+      });
+      const j = await r.json().catch(() => null);
+      if (j?.error) { errors.push(`${host}: ${j.error.message || "rejected"}`); continue; }
+      if (j?.result) return j.result;
+      errors.push(`${host}: unexpected response`);
+    } catch (e) { errors.push(`${host}: ${e.message}`); }
+  }
+  throw new Error("All private relays failed (no public fallback). " + errors.join(" | "));
+}
 function broadcastMode(k = netKey()) {
   const configured = state.flags.broadcast || settings().privacy?.broadcast || "auto";
   if (configured === "rpc") return "rpc";
@@ -1026,20 +1078,6 @@ function broadcastMode(k = netKey()) {
     return "rpc";
   }
   return "private";
-}
-async function flashbotsBroadcast(wallet, req) {
-  const populated = (req && req.nonce != null && req.gasLimit != null && req.chainId != null)
-    ? req : await wallet.populateTransaction(req);
-  const raw = await wallet.signTransaction(populated);
-  const r = await fetch(FLASHBOTS_URL, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_sendRawTransaction", params: [raw] }),
-    signal: AbortSignal.timeout(20000),
-  });
-  const j = await r.json().catch(() => null);
-  if (j?.error) throw new Error("Flashbots: " + (j.error.message || JSON.stringify(j.error)));
-  if (!j?.result) throw new Error("Flashbots: unexpected response");
-  return j.result;
 }
 async function waitHash(hash, prov) {
   return spin("Waiting for confirmation…", async () => {
@@ -1085,7 +1123,7 @@ async function doSend(fromIdx, toAddr, valueWei, netK, token = null) {
       ? { to: token.addr, value: 0n,
           data: new Contract(token.addr, ERC20_ABI).interface.encodeFunctionData("transfer", [toAddr, valueWei]) }
       : { to: toAddr, value: valueWei };
-    const hash = await spin("Private broadcast (Flashbots)…", () => flashbotsBroadcast(w, req));
+    const hash = await spin("Private broadcast (relay)…", () => flashbotsBroadcast(w, req));
     rc = await waitHash(hash, prov);
   } else {
     if (token) {
@@ -1899,7 +1937,7 @@ async function cmdSettings(args) {
     box("SETTINGS", [
       `privacy     rotation RPC ${s.privacy?.rpcRotation !== false ? "ON" : "OFF"} · jitter ${s.privacy?.queryJitter ? "ON" : "OFF"}`,
       `proxy       ${PROXY ? c.ok(PROXY) : "none"} · required ${netConfig()?.requireProxy ? c.ok("YES") : "no"}`,
-      `broadcast   ${((s.privacy?.broadcast) || "auto") === "rpc" ? "public RPC" : c.ok("private (Flashbots, ETH)")} · clearnet ${s.privacy?.allowClearnetSend ? c.warn("allowed") : c.ok("blocked")}`,
+      `broadcast   ${((s.privacy?.broadcast) || "auto") === "rpc" ? "public RPC" : c.ok("private (ETH)")} · clearnet ${s.privacy?.allowClearnetSend ? c.warn("allowed") : c.ok("blocked")}`,
       `btc api     ${s.btcApi ? c.ok(s.btcApi) : "Blockstream (public)"}`,
       `vpn check   ${s.vpnCheck ? c.ok("ON  (no connection without an active VPN)") : "OFF"} · fail-closed ${s.vpnFailClosed !== false ? c.ok("YES") : "no"}`,
       `prices      ${s.prices ? "ON  (fiat values via CoinGecko)" : "OFF (no price queries — better privacy)"}`,
@@ -2035,6 +2073,54 @@ async function cmdWipe(args) {
 }
 
 /* ─────────── Bitcoin commands ─────────── */
+async function cmdBtcUtxos(args) {
+  let a = args[0];
+  if (a == null) a = (await P({ type: "text", name: "v", message: `Which BTC wallet? (0-${BW().length - 1})` })).v;
+  const i = findBtcWallet(a);
+  if (i < 0) throw new Error(`BTC wallet not found: "${a}"`);
+  const e = BW()[i];
+  const list = await spin("Fetching UTXOs…", () => btcFetch(`/address/${e.address}/utxo`));
+  if (!Array.isArray(list) || !list.length) return console.log(c.dim("No UTXO on this wallet."));
+  const frozen = new Set(e.frozenUtxos || []);
+  table(["#", "OUTPOINT", "VALUE (BTC)", "STATE", "LABEL"], list.map((u, j) => [
+    `#${j}`, `${u.txid.slice(0, 8)}…:${u.vout}`, fmtBtc(u.value),
+    frozen.has(utxoKey(u)) ? c.warn("frozen") : c.ok("spendable"),
+    e.utxoLabels?.[utxoKey(u)] || "",
+  ]), { align: [null, null, "r"] });
+  console.log(c.dim("\n  freeze: btc freeze <wallet> <#> · unfreeze · label <wallet> <#> <text>"));
+  console.log(c.dim("  send with selection: send … --coincontrol"));
+}
+
+async function btcUtxoPick(args, action) {
+  const [a, which, ...rest] = args;
+  if (a == null || which == null) throw new Error(`Usage: btc ${action} <wallet> <#> [label]`);
+  const i = findBtcWallet(a);
+  if (i < 0) throw new Error(`BTC wallet not found: "${a}"`);
+  const e = BW()[i];
+  const list = await btcFetch(`/address/${e.address}/utxo`);
+  if (!Array.isArray(list) || !list.length) throw new Error("No UTXO on this wallet.");
+  const u = /^\d+$/.test(String(which)) ? list[Number(which)] : list.find(x => utxoKey(x) === String(which));
+  if (!u) throw new Error(`UTXO not found: ${which}`);
+  e.frozenUtxos ??= [];
+  e.utxoLabels ??= {};
+  const key = utxoKey(u);
+  if (action === "freeze" || action === "unfreeze") {
+    const idx = e.frozenUtxos.indexOf(key);
+    if (action === "freeze" && idx < 0) e.frozenUtxos.push(key);
+    if (action === "unfreeze" && idx >= 0) e.frozenUtxos.splice(idx, 1);
+    save();
+    return console.log(c.ok(`✓ ${key} ${action === "freeze" ? "frozen" : "spendable"} again`));
+  }
+  if (action === "label") {
+    const label = rest.join(" ").trim();
+    if (!label) throw new Error("Label cannot be empty.");
+    e.utxoLabels[key] = label;
+    save();
+    return console.log(c.ok(`✓ ${key} labelled "${label}"`));
+  }
+  throw new Error(`Unknown UTXO action: ${action}`);
+}
+
 async function cmdBtc(args) {
   const sub = args[0] || "list";
   if (sub === "create") {
@@ -2097,6 +2183,8 @@ async function cmdBtc(args) {
       { align: [null, null, null, "r"] });
     return;
   }
+  if (sub === "utxos") return cmdBtcUtxos(args.slice(1));
+  if (sub === "freeze" || sub === "unfreeze" || sub === "label") return btcUtxoPick(args.slice(1), sub);
   if (sub === "send") {
     if (!BW().length) throw new Error("No Bitcoin wallet — create one first (ravenne btc create).");
     let [fromA, toA, amtA] = [args[1], args[2], args[3]];
@@ -2117,8 +2205,22 @@ async function cmdBtc(args) {
     if (b) toAddr = b.address;
     if (!/^(bc1|tb1|1|3|m|n)[a-zA-Z0-9]{25,}$/.test(toAddr)) throw new Error("Invalid Bitcoin recipient address.");
     if (!(await clearnetSendGuard("the Bitcoin send"))) return console.log("Cancelled — no network tunnel.");
-    const utxos = await spin("Fetching UTXOs…", () => btcFetch(`/address/${src.address}/utxo`));
-    if (!Array.isArray(utxos) || !utxos.length) throw new Error("No UTXO to spend (empty wallet).");
+    const fetched = await spin("Fetching UTXOs…", () => btcFetch(`/address/${src.address}/utxo`));
+    if (!Array.isArray(fetched) || !fetched.length) throw new Error("No UTXO to spend (empty wallet).");
+    const spendable = liveUtxos(src, fetched);
+    if (!spendable.length) throw new Error("No spendable UTXO — all are frozen (ravenne btc unfreeze …).");
+    let utxos = spendable;
+    if (state.flags.coincontrol) {
+      header("COIN CONTROL");
+      spendable.forEach((u, j) => console.log(
+        `  #${j}  ${fmtBtc(u.value).padStart(12)} BTC  ${u.txid.slice(0, 8)}…:${u.vout}  ${src.utxoLabels?.[utxoKey(u)] || ""}`));
+      const { s } = await P({ type: "text", name: "s", message: "UTXOs to spend (e.g. 0,2 — empty = automatic):" });
+      if (s && String(s).trim()) {
+        const picks = [...new Set(String(s).split(/[,\s]+/).filter(Boolean).map(Number))];
+        if (picks.some(n => !Number.isInteger(n) || n < 0 || n >= spendable.length)) throw new Error("Invalid UTXO selection.");
+        utxos = picks.map(n => spendable[n]);
+      }
+    }
     const rates = await spin("Fetching fees…", () => btcFetch("/fee-estimates"));
     const satPerVb = Math.max(2, Math.ceil(Number(rates["6"] || rates["3"] || rates["1"] || 12)));
     const totalSat = utxos.reduce((s, u) => s + BigInt(u.value), 0n);
@@ -2138,7 +2240,7 @@ async function cmdBtc(args) {
       `From      btc#${from} ${src.label}  ${short(src.address)}`,
       `To        ${short(toAddr)}`,
       `Amount    ${fmtBtc(amountSat)} BTC   (est. fee ≈ ${fmtBtc(estFee)} @ ${satPerVb} sat/vB)`,
-      `UTXOs     ${utxos.length} available — change → fresh address (m/84'/…/1'/0/${changeIdx})`,
+      `UTXOs     ${utxos.length} selected${fetched.length !== spendable.length ? c.warn(` · ${fetched.length - spendable.length} frozen`) : ""} — change → fresh address (m/84'/…/1'/0/${changeIdx})`,
     ]);
     if (!(await confirm("Confirm and broadcast?"))) return console.log("Cancelled.");
     const { hex, fee, inputs, change } = await spin("Building & signing transaction…",
@@ -2154,8 +2256,7 @@ async function cmdBtc(args) {
   }
   if (sub === "sync") {
     let total = 0;
-    const jit = () => settings().privacy?.queryJitter ? sleep(150 + Math.floor(Math.random() * 600)) : Promise.resolve();
-    for (const w of BW()) {
+    const jit = () => settings().privacy?.queryJitter ? sleep(150 + Math.floor(Math.random() * 600)) : Promise.resolve();    for (const w of BW()) {
       const txs = await spin(`Syncing ${w.label}…`, async () => {
         const all = [];
         let next = `/address/${w.address}/txs`;
@@ -2436,8 +2537,10 @@ async function recordBtc(txid, from, to, amountSat, feeSat) {
 }
 async function sweepBtcOne(idx, destAddr) {
   const e = BW()[idx];
-  const utxos = await btcFetch(`/address/${e.address}/utxo`);
-  if (!Array.isArray(utxos) || !utxos.length) return 0n;
+  const all = await btcFetch(`/address/${e.address}/utxo`);
+  if (!Array.isArray(all) || !all.length) return 0n;
+  const utxos = liveUtxos(e, all);
+  if (!utxos.length) return 0n;
   const rates = await btcFetch("/fee-estimates");
   const satPerVb = Math.max(2, Math.ceil(Number(rates["6"] || rates["3"] || rates["1"] || 12)));
   const total = utxos.reduce((s, u) => s + BigInt(u.value), 0n);
@@ -2850,8 +2953,10 @@ async function cmdDuress(args) {
     if (r.d !== r.d2) throw new Error("Passwords do not match.");
     if (gateVerify(r.d)) throw new Error("Duress password must differ from the master password.");
     const salt = crypto.randomBytes(16);
-    const hash = crypto.scryptSync(r.d, salt, 32, { N: 16384, r: 8, p: 1 }).toString("hex");
-    const meta = gateMeta(); meta.duress = { salt: salt.toString("hex"), hash }; gateWriteMeta(meta);
+    const hash = kdfArgon(r.d, salt).toString("hex");
+    const meta = gateMeta();
+    meta.duress = { ...KDF2, salt: salt.toString("hex"), hash };
+    gateWriteMeta(meta);
     /* (Re)seal the decoy vault: reuse existing contents if the new duress
        password already opens it, otherwise start from a clean empty vault. */
     let existing = null;
@@ -2873,8 +2978,9 @@ const duressVerify = pw => {
   const meta = gateMeta();
   if (!meta.duress) return false;
   try {
-    const want = Buffer.from(meta.duress.hash, "hex");
-    const got = crypto.scryptSync(pw, Buffer.from(meta.duress.salt, "hex"), 32, { N: 16384, r: 8, p: 1 });
+    const d = meta.duress;
+    const want = Buffer.from(d.hash, "hex");
+    const got = deriveKey(pw, Buffer.from(d.salt, "hex"), d);
     return want.length === got.length && crypto.timingSafeEqual(got, want);
   } catch { return false; }
 };
@@ -3076,6 +3182,8 @@ async function simpleMenu() {
         description: "Guided: MAIN seed (paper) + receiving addresses." }] : []),
       { title: "Receive — new addresses", value: "addr",
         description: "One address per payer; everything forwards to MAIN." },
+      { title: "Verify an address", value: "verify",
+        description: "Checksum, known-wallet match and look-alike (poison) check." },
       { title: "Send", value: "send",
         description: "From a vault wallet to any address." },
       { title: "Forward everything to MAIN", value: "sweep",
@@ -3084,6 +3192,8 @@ async function simpleMenu() {
         description: "Automatic forwarding at randomized intervals." },
       { title: "Swap / convert", value: "swap",
         description: "Uniswap V2 — Ethereum mainnet." },
+      { title: "Private hop", value: "hop",
+        description: "EVM: move funds through a fresh wallet, wait, then to MAIN." },
       { title: "Wallets & balances", value: "wallets",
         description: "Every wallet on the active chain." },
       { title: "History", value: "hist",
@@ -3092,6 +3202,8 @@ async function simpleMenu() {
       ...(XW().length ? [{ title: "Monero", value: "xmr", description: "XMR balances (engine required)." }] : []),
       { title: "Privacy", value: "priv",
         description: "Tunnel, private broadcast, reused addresses." },
+      { title: "Harden privacy profile", value: "harden",
+        description: "One pass: proxy, jitter, rotation, private tx, clearnet off." },
       { title: "Settings", value: "set",
         description: "Proxy, VPN, jitter, broadcast, auto-lock." },
       { title: "Security & backups", value: "sec",
@@ -3117,17 +3229,20 @@ async function simpleMenu() {
         }
       }
       else if (a === "send") await cmdSend([]);
+      else if (a === "verify") await cmdVerify([]);
       else if (a === "sweep") await cmdSweep([]);
       else if (a === "auto") {
         const { m } = await P({ type: "number", name: "m", message: "Interval in minutes (randomized)?", initial: 15, min: 1, max: 720 });
         await cmdAuto([String(m)]);
       }
       else if (a === "swap") await cmdSwap([]);
+      else if (a === "hop") await cmdHop([]);
       else if (a === "wallets") await cmdList([]);
       else if (a === "hist") await cmdHistory([]);
       else if (a === "btc") await cmdBtc(["list"]);
       else if (a === "xmr") await cmdXmr(["list"]);
       else if (a === "priv") await cmdPrivacy();
+      else if (a === "harden") await cmdHarden();
       else if (a === "set") await quickSettings();
       else if (a === "sec") await securityMenu();
       else if (a === "vault") await vaultMode();
@@ -3287,6 +3402,126 @@ async function cmdPrivacy() {
     c.soft("Full checklist: ravenne check · sends blocked without a tunnel."),
   ]);
 }
+async function cmdHarden() {
+  header("HARDEN — PRIVACY PROFILE");
+  const s = settings();
+  box("CURRENT", [
+    `proxy       ${PROXY || "none"}${netConfig()?.requireProxy ? " (required)" : ""}`,
+    `broadcast   ${(s.privacy?.broadcast || "auto")}`,
+    `prices      ${s.prices ? "ON" : "off"}`,
+    `jitter      ${s.privacy?.queryJitter ? "on" : "off"} · rotation ${s.privacy?.rpcRotation !== false ? "on" : "off"}`,
+    `clearnet    ${s.privacy?.allowClearnetSend ? "ALLOWED" : "blocked"}`,
+  ]);
+  if (!(await confirm("Apply the hardened privacy profile?"))) return console.log("Cancelled.");
+  if (!PROXY) {
+    const { u } = await P({ type: "text", name: "u", placeholder: "http://127.0.0.1:8118",
+      message: "Tor/Privoxy proxy URL (empty = skip):" });
+    if (u && /^https?:\/\//.test(String(u).trim())) await applyProxy(String(u).trim());
+  }
+  if (PROXY && await confirm("Refuse to start without the proxy (requireProxy)?")) {
+    writeNetConfig({ ...(netConfig() || {}), requireProxy: true });
+  }
+  Object.assign(s, { prices: false, vpnCheck: true, vpnFailClosed: true });
+  s.privacy = { ...(s.privacy || {}), rpcRotation: true, queryJitter: true,
+                addressReuseGuard: true, allowClearnetSend: false, broadcast: "auto" };
+  if (!s.autolockMin || s.autolockMin > 15) s.autolockMin = 5;
+  save();
+  console.log(c.ok("✓ prices off · jitter on · rotation on · private broadcast · clearnet blocked · fail-closed VPN"));
+  if (await confirm("Set your own BTC Esplora endpoint?")) {
+    const { u } = await P({ type: "text", name: "u", placeholder: "http://127.0.0.1:3002/api",
+      message: "Esplora URL (empty = skip):" });
+    if (u) { s.btcApi = String(u).trim().replace(/\/$/, ""); save(); }
+  }
+  if (await confirm("Set your own Monero daemon?")) {
+    const { u } = await P({ type: "text", name: "u", placeholder: "http://127.0.0.1:18081",
+      message: "monerod URL (empty = skip):" });
+    if (u) { s.xmrDaemon = String(u).trim().replace(/\/json_rpc\/?$/, ""); save(); }
+  }
+  console.log(c.dim("\n  Next: ravenne privacy · ravenne check\n  Start Tor/Privoxy before sending anything."));
+}
+
+async function cmdVerify(args) {
+  let a = args[0];
+  if (a == null) a = (await P({ type: "text", name: "v", message: "Address, wallet index or btc:i:" })).v;
+  const raw = String(a ?? "").trim();
+  let addr = raw, kind = null, known = resolveWho(raw) || null;
+  if (/^0x/i.test(raw)) {
+    try { addr = getAddress(raw); kind = "EVM"; }
+    catch (e) { throw new Error("Invalid EVM address (checksum): " + e.message); }
+  } else if (/^[48][1-9A-HJ-NP-Za-km-z]{94,105}$/.test(raw)) {
+    kind = "Monero";
+  } else if (/^(bc1|tb1|[13mn])/.test(raw)) {
+    let ok = false;
+    for (const net of [bitcoin.networks.bitcoin, bitcoin.networks.testnet]) {
+      try { bitcoin.address.toOutputScript(raw, net); ok = true; break; } catch {}
+    }
+    if (!ok) throw new Error("Invalid Bitcoin address (checksum).");
+    kind = "Bitcoin";
+  } else {
+    const i = findWallet(raw);
+    if (i >= 0) { addr = W()[i].address; kind = "EVM"; known = `#${i} ${W()[i].label}`; }
+    else {
+      const b = findBtcWallet(raw.replace(/^btc:/i, ""));
+      if (b >= 0) { addr = BW()[b].address; kind = "Bitcoin"; known = `btc#${b} ${BW()[b].label}`; }
+      else {
+        const bk = settings().book.find(x => x.label.toLowerCase() === raw.toLowerCase());
+        if (bk) { addr = bk.address; kind = "EVM"; known = `${bk.label} (book)`; }
+        else throw new Error("Not a valid address, wallet index or book label.");
+      }
+    }
+  }
+  const twin = poisoningCheck(addr);
+  header("ADDRESS CHECK");
+  box(`${kind} ADDRESS`, [
+    `address     ${addr}`,
+    `known       ${known || "not in this vault"}`,
+    `look-alike  ${twin ? c.err("YES — matches " + short(twin)) : c.ok("none detected")}`,
+  ]);
+  if (!twin) qrcode.generate(addr, { small: true });
+}
+
+async function cmdHop(args) {
+  if (!W().length) throw new Error("No wallet yet.");
+  const m = mainEvm();
+  if (!m) throw new Error("No MAIN wallet — run the setup first.");
+  let a = args[0];
+  if (a == null) a = (await P({ type: "text", name: "f", message: `Hop from which wallet? (0-${W().length - 1})` })).f;
+  const from = findWallet(a);
+  if (from < 0) throw new Error(`Wallet not found: "${a}"`);
+  requireKey(from);
+  if (!(await clearnetSendGuard("the hop"))) return console.log("Cancelled — no network tunnel.");
+  const prov = provider();
+  const bal = await prov.getBalance(W()[from].address);
+  const per = await feePerTx(prov);
+  if (bal <= per * 2n) throw new Error(`Balance too low: ${fmtAmt(bal)} (need > ${fmtAmt(per * 2n)} for two sends).`);
+  const mins = args[1] ? Math.max(1, parseInt(args[1], 10) || 30)
+    : (await P({ type: "number", name: "m", initial: 30, min: 1, max: 720,
+        message: "Wait between the two hops (minutes, randomized ±25%)?" })).m;
+  const waitMs = Math.round(mins * (0.75 + Math.random() * 0.5) * 60000);
+  box("PRIVATE HOP — EVM", [
+    `From      #${from} ${W()[from].label}  ${short(W()[from].address)}`,
+    `Hop       fresh wallet (key stored in this vault)`,
+    `Then      MAIN ${short(m.address)}`,
+    `Wait      ~${Math.round(waitMs / 60000)} min (randomized)`,
+    `Cost      2 transactions (double gas)`,
+  ]);
+  if (!(await confirm("Start the hop?"))) return console.log("Cancelled.");
+  const hop = newWalletEntry(state.flags.words);
+  hop.label = `hop-${new Date().toISOString().slice(5, 16).replace(/[:T]/g, "")}`;
+  hop.role = "receive";
+  W().push(hop); save();
+  const { block } = await doSend(from, hop.address, bal - per, netKey());
+  console.log(c.ok(`✓ hop funded in block ${block} — waiting ~${Math.round(waitMs / 60000)} min`));
+  console.log(c.dim(`  Ctrl+C keeps the funds in ${hop.label}; its key stays in the vault.`));
+  await sleep(waitMs);
+  const bal2 = await prov.getBalance(hop.address);
+  const per2 = await feePerTx(prov).catch(() => per);
+  if (bal2 <= per2) return console.log(c.warn(`Hop wallet too low (${fmtAmt(bal2)}); funds remain in ${hop.label}.`));
+  const { hash } = await doSend(W().indexOf(hop), m.address, bal2 - per2, netKey());
+  console.log(c.ok(`✓ hop complete → MAIN (${short(m.address)})`));
+  printTxLink(hash, netKey());
+}
+
 async function cmdCheck() {
   header("DIAGNOSTICS");
   const rows = [];
@@ -3327,8 +3562,8 @@ async function quickSettings() {
         description: "If adapters cannot be inspected, BLOCK instead of assuming you are protected." },
       { title: `Require proxy: ${netConfig()?.requireProxy ? "ON" : "OFF"}`, value: "reqproxy",
         description: "Refuse to start without an HTTP proxy (Tor/Privoxy/VPN box). Fail closed." },
-      { title: `Broadcast: ${(s.privacy?.broadcast || "auto") === "rpc" ? "public RPC" : "private (Flashbots)"}`, value: "bcast",
-        description: "Private = the transaction never touches the public mempool (Ethereum)." },
+      { title: `Broadcast: ${(s.privacy?.broadcast || "auto") === "rpc" ? "public RPC" : "private (ETH)"}`, value: "bcast",
+        description: "Private = sent through Flashbots/MEV Blocker, never the public mempool." },
       { title: `Clearnet sends: ${s.privacy?.allowClearnetSend ? "ALLOWED" : "blocked"}`, value: "clearnet",
         description: "Blocked = refuses to send while no proxy/Tor is active." },
       { title: `BTC API: ${s.btcApi ? "custom" : "Blockstream public"}`, value: "btcapi",
@@ -3964,17 +4199,17 @@ const MENU_ACTIONS = {
   ledger: cmdLedger, rename: cmdRename, phrase: cmdPhrase, export: cmdExport, remove: cmdRemove,
   send: cmdSend, split: cmdSplit, consolidate: cmdConsolidate, tokens: cmdTokens, book: cmdBook,
   qr: cmdQr, settings: cmdSettings, changepass: cmdChangePass, wipe: cmdWipe, btc: cmdBtc,
-  usb: cmdUsb, swap: cmdSwap, convert: cmdConvert, profile: cmdProfile, temp: cmdTemp,
-  usbbackup: cmdUsbBackup, usbrestore: cmdUsbRestore,
+  usb: cmdUsb, swap: cmdSwap, hop: cmdHop, convert: cmdConvert, profile: cmdProfile, temp: cmdTemp,
+  verify: cmdVerify, harden: cmdHarden, usbbackup: cmdUsbBackup, usbrestore: cmdUsbRestore,
 };
 const MENU = {
   "Insight & data": ["dashboard", "list", "balance", "stats", "history", "sync", "csv", "price"],
-  "Wallets": ["profile", "create", "import", "watch", "ledger", "temp", "rename", "phrase", "export", "remove", "qr"],
-  "Transfers": ["send", "swap", "split", "consolidate"],
-  "Bitcoin": ["btc-list", "btc-create", "btc-balance", "btc-send", "btc-watch", "btc-qr", "btc-phrase", "btc-sync", "btc-network"],
+  "Wallets": ["profile", "create", "import", "watch", "ledger", "temp", "rename", "phrase", "export", "remove", "verify", "qr"],
+  "Transfers": ["send", "swap", "hop", "split", "consolidate"],
+  "Bitcoin": ["btc-list", "btc-create", "btc-balance", "btc-send", "btc-watch", "btc-utxos", "btc-qr", "btc-phrase", "btc-sync", "btc-network"],
   "Monero (XMR)": ["xmr-list", "xmr-create", "xmr-balance", "xmr-send", "xmr-forward", "xmr-watch", "xmr-phrase", "xmr-install", "xmr-connect", "xmr-node", "xmr-network"],
   "USB & advanced": ["usb", "tokens", "book", "tx-prepare", "tx-sign", "tx-broadcast"],
-  "Settings & security": ["privacy", "twofa", "duress", "network", "rpc", "proxy", "tor", "settings", "changepass", "lock", "wipe"],
+  "Settings & security": ["privacy", "harden", "twofa", "duress", "network", "rpc", "proxy", "tor", "settings", "changepass", "lock", "wipe"],
   "Automation": ["usbbackup", "usbrestore"],
 };
 const MENU_TITLES = {
@@ -3985,11 +4220,13 @@ const MENU_TITLES = {
   import: "Import a wallet (MetaMask, keystore…)", watch: "Add watch-only wallet",
   ledger: "Add Ledger wallet (device)", rename: "Rename a wallet", phrase: "Reveal a seed phrase",
   export: "Export a keystore", remove: "Remove a wallet", qr: "Show address QR code",
-  send: "Send (coin or ERC-20)", swap: "Swap coins (Uniswap: ETH ↔ USDT/USDC)", split: "Split a wallet into many", consolidate: "Consolidate everything into one",
+  verify: "Verify an address (checksum, look-alike, QR)",
+  send: "Send (coin or ERC-20)", swap: "Swap coins (Uniswap: ETH ↔ USDT/USDC)", hop: "Private hop (fresh wallet, delayed)", split: "Split a wallet into many", consolidate: "Consolidate everything into one",
   "btc-list": "Bitcoin wallets", "btc-create": "Create Bitcoin wallets",
   "btc-balance": "Bitcoin balances", "btc-send": "Send Bitcoin",
   "btc-watch": "Watch a BTC address", "btc-qr": "BTC address QR",
   "btc-phrase": "Reveal BTC seed phrase", "btc-sync": "Sync Bitcoin history",
+  "btc-utxos": "Bitcoin UTXOs (coin control)",
   "btc-network": "BTC mainnet / testnet",
   "xmr-list": "Monero wallets (keys local, remote node)", "xmr-create": "Create Monero wallets (25-word seeds)",
   "xmr-balance": "Monero balances (needs engine)", "xmr-send": "Send Monero (untraceable by design)",
@@ -4003,6 +4240,7 @@ const MENU_TITLES = {
   "tx-broadcast": "Offline: broadcast a signed tx", network: "Switch chain", rpc: "RPC endpoints",
   settings: "Settings (prices, VPN check, auto-lock)", changepass: "Change master password",
   twofa: "2FA (TOTP local - authenticator app)", duress: "Duress wallet (decoy vault)",
+  harden: "Harden privacy profile",
   tor: "Route traffic through local Tor",
   privacy: "Traceability — tunnel, broadcast, addresses",
   proxy: "Persistent HTTP proxy (Tor/Privoxy/VPN box)",
@@ -4068,6 +4306,8 @@ async function advancedMenu(fromHome = false) {
     qr: "Display an address as a scannable QR code.",
     send: "Send coins or ERC-20 tokens to any address, wallet or book entry.",
     swap: "Convert ETH ↔ USDT/USDC via Uniswap with a price preview.",
+    hop: "EVM: send through a fresh wallet, wait randomly, then to MAIN.",
+    verify: "Check an address: checksum, known wallet, look-alike (poison).",
     split: "Divide one wallet across several NEW wallets (random amounts optional).",
     consolidate: "Sweep every other wallet into a single target wallet.",
     usb: "Create or open an encrypted wallet stored on a USB stick.",
@@ -4081,6 +4321,7 @@ async function advancedMenu(fromHome = false) {
     changepass: "Change the master password (re-encrypts gate + vault).",
     twofa: "Require a rotating 6-digit code (authenticator app) at every unlock.",
     duress: "A second password that opens a plain decoy vault under pressure.",
+    harden: "One pass: proxy, jitter, rotation, private tx, clearnet blocked.",
     tor: "Route ALL traffic through a local Tor/Privoxy proxy.",
     proxy: "Set a persistent HTTP proxy and optionally require it (fail closed).",
     usbbackup: "Copy vault + secure vault + gate + proxy config to USB (1 command).",
@@ -4093,6 +4334,7 @@ async function advancedMenu(fromHome = false) {
     "btc-balance": "Balances of all BTC wallets.", "btc-send": "Send BTC (bc1…) with fee estimate.",
     "btc-watch": "Watch a BTC address without keys.", "btc-qr": "QR code of a BTC address.",
     "btc-phrase": "Reveal the BTC seed phrase.", "btc-sync": "Fetch BTC history from Blockstream.",
+    "btc-utxos": "Coin control: list, freeze, label and select UTXOs.",
     "btc-network": "Switch Bitcoin between mainnet and testnet.",
     "xmr-list": "Monero wallets and balances — keys never leave the vault.",
     "xmr-create": "Generate Monero wallets offline (25-word seed + restore height).",
@@ -4208,7 +4450,10 @@ Wallets (EVM)
 Bitcoin
   btc create [n]               Create BTC wallets (24-word seed, BIP84)
   btc list · btc balance       Addresses & balances (Blockstream API)
-  btc send <btc:i> <addr> <amt>   Send BTC (or "max")
+  btc send <btc:i> <addr> <amt>   Send BTC (or "max") · add --coincontrol
+  btc utxos <btc:i>            List UTXOs (coin control)
+  btc freeze|unfreeze <i> <#>  Exclude/include a UTXO from spends
+  btc label <i> <#> <text>     Label a UTXO
   btc watch <addr> <label> · btc qr <btc:i> · btc phrase <btc:i>
   btc sync                     Fetch incoming/outgoing BTC history
   btc network main|test        Switch Bitcoin mainnet / testnet
@@ -4227,6 +4472,7 @@ Monero (XMR) — privacy coin: sender, receiver and amounts are hidden on-chain
 Transfers (EVM)
   send <from> <to> <amount>    Send coin (index/label/book/0x…, or "max")
   send … --token <SYM>         Send an ERC-20 token instead
+  hop <from> [minutes]         Private hop: fresh wallet → wait → MAIN
   split <from> <n>             Split a wallet into n NEW wallets
         --random               Random share sizes (anti-clustering)
   consolidate <target>         Sweep ALL other wallets into <target>
@@ -4253,6 +4499,9 @@ Offline signing (air-gapped, EVM)
 Security & privacy
   changepass · lock · wipe     Master password · session lock · secure erase
   wipe all                     Vaults + duress + XMR caches + logs
+  harden                       Apply the privacy profile in one pass
+  verify <addr|wallet>         Checksum + look-alike (poison) check + QR
+  privacy                      Traceability dashboard
   rpc [chain] [url|reset]      Use your own node (IP privacy)
   proxy <url>|off|require …    Persistent HTTP proxy, fail-closed option
   settings                     Prices, rotation, jitter, sweep, VPN fail-closed
@@ -4260,7 +4509,8 @@ Security & privacy
 
 Flags: --yes · --all · --random · --delay <s> · --words 24 · --seed
        --token <SYM> · --file <path> · --keystore <file>
-       --broadcast private|rpc · --no-vpn · --no-gate · --no-proxy
+       --broadcast private|rpc · --coincontrol
+       --no-vpn · --no-proxy
 Scripting: RAVENNE_PASS=<password> (also RAVENNE_KEYPASS for keystores).
 
 Examples:
@@ -4287,6 +4537,7 @@ const ROUTES = {
   simple: simpleMenu, usb: cmdUsb, swap: cmdSwap, convert: cmdConvert, xmr: cmdXmr,
   profile: cmdProfile, temp: cmdTemp,
   twofa: cmdTwofa, duress: cmdDuress, tor: cmdTor, proxy: cmdProxy, privacy: cmdPrivacy,
+  harden: cmdHarden, hop: cmdHop, verify: cmdVerify,
   usbbackup: cmdUsbBackup, usbrestore: cmdUsbRestore,
   backup: cmdBackup, restore: cmdRestore, "export-key": cmdExportKey, check: cmdCheck,
   lock: async () => { await lockSession(false); console.log("Session locked — run a command to continue."); },
@@ -4296,7 +4547,7 @@ const ROUTES = {
 };
 
 function parseArgs(argv) {
-  const flags = { yes: false, all: false, random: false, delay: 0, words: 12, seed: false, token: null, file: null, keystore: null, keepKey: false, profile: null, noProxy: false, broadcast: null };
+  const flags = { yes: false, all: false, random: false, delay: 0, words: 12, seed: false, token: null, file: null, keystore: null, keepKey: false, profile: null, noProxy: false, broadcast: null, coincontrol: false };
   const args = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -4305,6 +4556,7 @@ function parseArgs(argv) {
     else if (a === "--random" || a === "-r") flags.random = true;
     else if (a === "--seed") flags.seed = true;
     else if (a === "--keep-key") flags.keepKey = true;
+    else if (a === "--coincontrol") flags.coincontrol = true;
     else if (a === "--delay") flags.delay = parseFloat(argv[++i]) || 0;
     else if (a === "--words") flags.words = parseInt(argv[++i], 10) === 24 ? 24 : 12;
     else if (a === "--token") flags.token = argv[++i];
@@ -4366,7 +4618,7 @@ async function main() {
 }
 
 /* Test hooks (pure helpers only — no wallet state required). */
-export const _internals = { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode };
+export const _internals = { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, utxoKey, liveUtxos };
 
 /* Direct execution — including bundled .cjs and pkg .exe forms. */
 const isMain = (() => {

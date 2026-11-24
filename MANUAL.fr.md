@@ -1,6 +1,6 @@
 # Ravenne Wallet — Manuel d'utilisation (français)
 
-Version 9.4.1 · Windows · Node.js 18+ · licence MIT
+Version 9.5.0 · Windows · Node.js 18+ · licence MIT
 
 Ravenne est un wallet crypto **100 % local, 100 % terminal**. Aucun compte,
 aucun serveur, aucune télémétrie, **aucune activation**. Toutes les clés
@@ -167,6 +167,7 @@ qr <i>
 
 ```
 send <from> <to> <montant> [--token SYM] [--broadcast private|rpc]
+hop <from> [minutes]        wallet frais → attente aléatoire → MAIN
 split <from> <n> [--random] [--delay s]
 consolidate <target> [--delay s]
 swap <from> <to> <montant> [wallet#]
@@ -179,7 +180,10 @@ convert eth off
 ```
 btc create [n]
 btc list · btc balance
-btc send <btc:i> <adresse> <montant>
+btc send <btc:i> <adresse> <montant> [--coincontrol]
+btc utxos <btc:i>            lister les UTXO
+btc freeze|unfreeze <i> <#>  exclure / réintégrer un UTXO
+btc label <i> <#> <texte>    étiqueter un UTXO
 btc watch <adresse> <label>
 btc qr <btc:i> · btc phrase <btc:i>
 btc sync
@@ -219,6 +223,8 @@ tx-broadcast u.json.signed.json                     [en ligne, vite]
 changepass
 lock
 wipe [all]                  coffre actif, ou toutes les données locales
+harden                      profil de confidentialité en une passe
+verify <adresse|wallet>     checksum + look-alike + QR
 2fa on|off
 duress on|off
 network <chain>
@@ -310,8 +316,9 @@ Ravenne route **tout** par ce proxy : RPC, explorateurs, prix, Monero.
 
 ### Diffusion privée
 
-Sur **Ethereum mainnet**, les envois passent par **Flashbots Protect** :
-la transaction ne transite pas par le mempool public.
+Sur **Ethereum mainnet**, les envois passent par **Flashbots Protect** puis
+**MEV Blocker** : la transaction ne transite jamais par le mempool public.
+Si les deux relais échouent, l'envoi échoue — **aucun repli public**.
 
 ```powershell
 ravenne settings broadcast private   # forcé
@@ -336,6 +343,11 @@ En mode `auto` (daemon), aucun prompt : bloqué tant qu'il n'y a pas de tunnel.
 
 ### Autres leviers
 
+- `ravenne harden` : applique le profil complet en une passe (proxy, jitter,
+  rotation, diffusion privée, clearnet bloqué, VPN fail-closed).
+- `ravenne hop <wallet> [minutes]` : wallet frais, attente aléatoire, MAIN.
+- `ravenne verify <adresse|wallet>` : checksum, appartenance, look-alike.
+- **Coin control BTC** : `btc utxos`, `btc freeze`, `btc label`, `send --coincontrol`.
 - `ravenne privacy` : tableau de bord des couches de traçabilité.
 - Rotation RPC et jitter : `settings rotation on`, `settings jitter on`.
 - Ton propre RPC : `ravenne rpc eth http://ton-node:8545`.
@@ -356,8 +368,10 @@ En mode `auto` (daemon), aucun prompt : bloqué tant qu'il n'y a pas de tunnel.
 
 ## 8. Sécurité
 
-- **Portail** : scrypt + comparaison à temps constant.
-- **Coffre** : AES-256-GCM, scrypt par mot de passe.
+- **Portail** : **Argon2id** (32 Mio, t=3) + comparaison à temps constant.
+  Les anciens coffres scrypt sont acceptés et migrés au déverrouillage suivant.
+- **Coffre** : AES-256-GCM, Argon2id, **paddé par blocs de 4 Kio** (la taille
+  du fichier ne révèle pas le nombre de wallets). Déverrouillage ≈ 4–6 s.
 - **Verrouillage persistant** : les échecs survivent au redémarrage ;
   blocage temporaire à partir de 10 échecs.
 - **2FA TOTP** locale : `2fa on`.
@@ -389,7 +403,7 @@ firmware) reste hors de portée.
 | Fichier | Rôle |
 |---|---|
 | `ravenne.js` | moteur / point d'entrée unique |
-| `access.ravenne.json` | sel + hash scrypt du mot de passe maître |
+| `access.ravenne.json` | sel + hash Argon2id du mot de passe maître |
 | `vault.ravenne.json` | coffre principal (AES-256-GCM) |
 | `vault.secure.json` | coffre Vault (mot de passe séparé) |
 | `vault-decoy.ravenne.json` | coffre leurre (duress) |
@@ -413,8 +427,8 @@ lance avec `--no-proxy` (expose ton IP).
 **« Envoi bloqué sans tunnel »** — `ravenne proxy …` ou
 `ravenne settings allowclearnet on`.
 
-**Flashbots échoue** — passe en `settings broadcast rpc` ; certaines
-transactions ou certaines heures sont refusées.
+**Flashbots échoue** — les deux relais privés sont indisponibles ; réessaie
+plus tard ou passe en `settings broadcast rpc`.
 
 **RPC injoignable** — `ravenne rpc <chain> reset`, ou choisis un autre
 endpoint : `ravenne rpc eth https://…`.
@@ -430,7 +444,7 @@ exclusions.
 ## 12. Tests, build, licence
 
 ```powershell
-npm test       # node:test — 11 tests
+npm test       # node:test — 13 tests
 .\build.bat    # exe + zip
 ```
 

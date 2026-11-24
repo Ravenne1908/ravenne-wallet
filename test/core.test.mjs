@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import * as bitcoin from "bitcoinjs-lib";
 
 import {
@@ -12,7 +13,7 @@ import {
   btcAddressFromPhrase, btcChangeFromPhrase, buildBtcTx, mergeChainTx,
 } from "../ravenne.js";
 
-const { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode } = _internals;
+const { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, liveUtxos } = _internals;
 
 const tmp = () => path.join(os.tmpdir(), `ravenne-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
 
@@ -54,7 +55,26 @@ test("vault encrypt/decrypt round-trip and wrong password fails", () => {
   assert.deepEqual(decryptVault("correct horse battery", file), payload);
   assert.throws(() => decryptVault("wrong password", file));
   const raw = JSON.parse(fs.readFileSync(file, "utf8"));
-  assert.match(raw.tag, /^[0-9a-f]{32}$/);   // real GCM tag present
+  assert.match(raw.tag, /^[0-9a-f]{32}$/);         // real GCM tag
+  assert.equal(raw.kdf, "argon2id");                // new default
+  const bytes = Buffer.from(raw.data, "base64").length;
+  assert.equal(bytes % 4096, 0, "ciphertext padded to 4 KiB buckets");
+  fs.unlinkSync(file);
+});
+
+test("legacy scrypt vaults still decrypt and keep working", () => {
+  const file = tmp();
+  const pass = "legacy-password";
+  const salt = crypto.randomBytes(16), iv = crypto.randomBytes(12);
+  const key = crypto.scryptSync(pass, salt, 32, { N: 16384, r: 8, p: 1 });
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const data = Buffer.concat([cipher.update(JSON.stringify({ legacy: true }), "utf8"), cipher.final()]);
+  fs.writeFileSync(file, JSON.stringify({
+    app: "ravenne", v: 7,
+    salt: salt.toString("hex"), iv: iv.toString("hex"),
+    tag: cipher.getAuthTag().toString("hex"), data: data.toString("base64"),
+  }));
+  assert.deepEqual(decryptVault(pass, file), { legacy: true });
   fs.unlinkSync(file);
 });
 
@@ -126,6 +146,15 @@ test("mergeChainTx dedupes by hash and caps history", () => {
   assert.equal(mergeChainTx(p, items, "eth"), 0);
   assert.equal(p.chainTx.length, 2);
   assert.equal(p.chainTx[0].hash, "0xbb");
+});
+
+test("BTC coin control filters frozen UTXOs", () => {
+  const e = { frozenUtxos: ["aa:0"] };
+  const list = [{ txid: "aa", vout: 0, value: 1 }, { txid: "bb", vout: 1, value: 2 }];
+  const live = liveUtxos(e, list);
+  assert.equal(live.length, 1);
+  assert.equal(live[0].txid, "bb");
+  assert.equal(liveUtxos({}, list).length, 2);
 });
 
 test("TOTP base32 round-trip and stable codes", () => {

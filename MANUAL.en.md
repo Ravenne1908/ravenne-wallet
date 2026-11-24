@@ -1,6 +1,6 @@
 # Ravenne Wallet — User Manual (English)
 
-Version 9.4.1 · Windows · Node.js 18+ · MIT license
+Version 9.5.0 · Windows · Node.js 18+ · MIT license
 
 Ravenne is a **100% local, 100% terminal** crypto wallet. No account, no
 server, no telemetry, **no activation**. All keys stay on your machine,
@@ -165,6 +165,7 @@ qr <i>
 
 ```
 send <from> <to> <amount> [--token SYM] [--broadcast private|rpc]
+hop <from> [minutes]        fresh wallet → random wait → MAIN
 split <from> <n> [--random] [--delay s]
 consolidate <target> [--delay s]
 swap <from> <to> <amount> [wallet#]
@@ -177,7 +178,10 @@ convert eth off
 ```
 btc create [n]
 btc list · btc balance
-btc send <btc:i> <address> <amount>
+btc send <btc:i> <address> <amount> [--coincontrol]
+btc utxos <btc:i>            list UTXOs
+btc freeze|unfreeze <i> <#>  exclude / re-include a UTXO
+btc label <i> <#> <text>     label a UTXO
 btc watch <address> <label>
 btc qr <btc:i> · btc phrase <btc:i>
 btc sync
@@ -217,6 +221,8 @@ tx-broadcast u.json.signed.json                     [online, soon]
 changepass
 lock
 wipe [all]                  active vault, or all local data
+harden                      apply the privacy profile in one pass
+verify <address|wallet>     checksum + look-alike + QR
 2fa on|off
 duress on|off
 network <chain>
@@ -308,8 +314,9 @@ Ravenne routes **everything** through it: RPC, explorers, prices, Monero.
 
 ### Private broadcast
 
-On **Ethereum mainnet**, sends go through **Flashbots Protect**: the
-transaction never touches the public mempool.
+On **Ethereum mainnet**, sends go through **Flashbots Protect** then
+**MEV Blocker**: the transaction never touches the public mempool. If both
+relays fail, the send fails — **no public fallback**.
 
 ```powershell
 ravenne settings broadcast private   # forced
@@ -334,6 +341,11 @@ In `auto` (daemon) mode there is no prompt: blocked until a tunnel exists.
 
 ### Other levers
 
+- `ravenne harden`: applies the full profile in one pass (proxy, jitter,
+  rotation, private broadcast, clearnet blocked, fail-closed VPN).
+- `ravenne hop <wallet> [minutes]`: fresh wallet, random wait, MAIN.
+- `ravenne verify <address|wallet>`: checksum, ownership, look-alike.
+- **BTC coin control**: `btc utxos`, `btc freeze`, `btc label`, `send --coincontrol`.
 - `ravenne privacy`: traceability dashboard.
 - RPC rotation and jitter: `settings rotation on`, `settings jitter on`.
 - Your own RPC: `ravenne rpc eth http://your-node:8545`.
@@ -354,8 +366,10 @@ In `auto` (daemon) mode there is no prompt: blocked until a tunnel exists.
 
 ## 8. Security
 
-- **Gate**: scrypt + constant-time comparison.
-- **Vault**: AES-256-GCM, scrypt per password.
+- **Gate**: **Argon2id** (32 MiB, t=3) + constant-time comparison.
+  Legacy scrypt vaults are accepted and migrated on the next unlock.
+- **Vault**: AES-256-GCM, Argon2id, **padded to 4 KiB buckets** (file size
+  does not reveal the wallet count). Unlock ≈ 4–6 s.
 - **Persistent lockout**: failures survive restarts; temporary lock from
   10 failures.
 - **Local TOTP 2FA**: `2fa on`.
@@ -387,7 +401,7 @@ out of scope.
 | File | Role |
 |---|---|
 | `ravenne.js` | engine / single entry point |
-| `access.ravenne.json` | scrypt salt + hash of the master password |
+| `access.ravenne.json` | Argon2id salt + hash of the master password |
 | `vault.ravenne.json` | main vault (AES-256-GCM) |
 | `vault.secure.json` | Vault store (separate password) |
 | `vault-decoy.ravenne.json` | decoy vault (duress) |
@@ -411,8 +425,8 @@ ravenne settings failclosed off   # old fail-open behavior
 **"Envoi bloqué sans tunnel" (send blocked)** — `ravenne proxy …` or
 `ravenne settings allowclearnet on`.
 
-**Flashbots fails** — switch to `settings broadcast rpc`; some transactions
-or times are refused.
+**Flashbots fails** — both private relays are unavailable; retry later or
+switch to `settings broadcast rpc`.
 
 **RPC unreachable** — `ravenne rpc <chain> reset`, or pick another endpoint:
 `ravenne rpc eth https://…`.
@@ -428,7 +442,7 @@ exclusions.
 ## 12. Tests, build, license
 
 ```powershell
-npm test       # node:test — 11 tests
+npm test       # node:test — 13 tests
 .\build.bat    # exe + zip
 ```
 

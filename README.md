@@ -22,11 +22,13 @@ sans télémétrie, sans activation.
   clés privées) sont sur le disque.
 - **Bitcoin** BIP84 (bc1…), change sur adresse fraîche, mainnet/testnet.
 - **Monero** : clés générées localement, wallet engine optionnel.
-- **Sécurité** : passphrase maître scrypt, coffre AES-256-GCM, 2FA TOTP,
-  coffre leurre (duress), verrouillage persistant, wipe 3 passes.
+- **Sécurité** : passphrase maître **Argon2id** (32 Mio, t=3), coffre AES-256-GCM
+  **paddé par blocs de 4 Kio**, 2FA TOTP, coffre leurre (duress), verrouillage
+  persistant, wipe 3 passes.
 - **Confidentialité** : proxy persistant, Tor, rotation RPC, jitter,
-  diffusion privée (Flashbots sur Ethereum), API BTC personnalisable,
-  garde anti-réutilisation d'adresse, blocage des envois sans tunnel.
+  diffusion privée multi-relais (Flashbots + MEV Blocker), API BTC
+  personnalisable, coin control BTC (freeze/label), hop privé, garde
+  anti-réutilisation d'adresse, blocage des envois sans tunnel.
 
 ## Installation
 
@@ -61,6 +63,9 @@ ravenne setup                # MAIN + adresses de réception
 ravenne addresses 5          # nouvelles adresses à donner
 ravenne temp 24h             # adresse jetable, une seule fois
 ravenne sweep                # tout renvoyer vers MAIN
+ravenne hop 0 30             # hop privé EVM (wallet frais, attente, MAIN)
+ravenne harden               # profil de confidentialité en une passe
+ravenne verify w1            # checksum + look-alike + QR
 ravenne send 0 alice 0.1     # depuis le wallet #0
 ravenne privacy              # ce qui peut te relier
 ravenne check                # diagnostics

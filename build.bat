@@ -75,6 +75,7 @@ if errorlevel 1 (
   powershell -NoProfile -Command "Compress-Archive -Path 'dist\*' -DestinationPath 'ravenne-wallet-v%VER%.zip' -Force"
 )
 if not exist ravenne-wallet-v%VER%.zip goto err
+powershell -NoProfile -Command "$h=(Get-FileHash -Algorithm SHA256 'ravenne-wallet-v%VER%.zip').Hash.ToLower(); \"$h  ravenne-wallet-v%VER%.zip\" | Set-Content 'ravenne-wallet-v%VER%.zip.sha256' -Encoding ascii"
 
 echo.
 echo   ============================================
@@ -84,6 +85,7 @@ echo    dist\ravenne.bat     - launcher (exe if present, else Node.js)
 echo    dist\ravenne.cjs     - single-file bundle (needs Node.js)
 echo    dist\ravenne.exe     - standalone, no install needed ^(if built^)
 echo    ravenne-wallet-v%VER%.zip  - share this file
+echo    ravenne-wallet-v%VER%.zip.sha256  - checksum
 echo.
 echo    First launch on a new machine asks to create
 echo    a master password. Nothing personal is inside.
