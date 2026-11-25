@@ -1,6 +1,6 @@
 # Ravenne Wallet — User Manual (English)
 
-Version 9.9.0 · Windows · Node.js 18+ · MIT license
+Version 9.9.1 · Windows · Node.js 18+ · MIT license
 
 Ravenne is a **100% local, 100% terminal** crypto wallet. No account, no
 server, no telemetry, **no activation**. All keys stay on your machine,

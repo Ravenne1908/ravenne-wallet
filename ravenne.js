@@ -27,7 +27,7 @@ import { HDKey } from "@scure/bip32";
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
-const VERSION = "9.9.0";
+const VERSION = "9.9.1";
 process.title = "Ravenne Wallet";
 
 /* Network-layer privacy: route ALL outgoing HTTP (RPC, explorers, prices)
@@ -452,7 +452,6 @@ function uiMenu({ message, choices, header = [], initial = 0 }) {
       stdin.removeListener("keypress", onKey);
       stdout.removeListener("resize", render);
       try { stdin.setRawMode(false); } catch {}
-      stdin.pause();
       stdout.write("\x1b[2J\x1b[H");
       resolve(val);
     };
@@ -505,15 +504,14 @@ function uiMenu({ message, choices, header = [], initial = 0 }) {
       const ind = " ".repeat(left);
       stdout.write("\x1b[2J\x1b[H" + "\n".repeat(top) +
         L.map(l => ind + l).join("\n") + "\n" +
-        ind + c.soft("↑↓ move   ·   enter select   ·   esc cancel") + "\n");
+        ind + c.soft("↑↓ move   ·   enter select   ·   esc back / cancel") + "\n");
     };
 
     stdin.setRawMode(true);
     stdin.resume();
     stdin.on("keypress", onKey);
     stdout.on("resize", render);
-    render();
-  });
+    render();  });
 }
 async function spin(label, fn) {
   if (!TTY) { console.log(c.dim(`* ${label}`)); return fn(); }
