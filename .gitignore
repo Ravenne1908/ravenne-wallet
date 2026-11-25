@@ -12,12 +12,20 @@ ui-errors.log
 ravenne-keystore-*.json
 machines.json
 
+# automatic backups / crash artifacts
+*.bak
+*.corrupt-*
+.*.tmp
+*.pem
+*.sig
+
 # network config (proxy URL, requireProxy)
 net.ravenne.json
 
 # generated / intermediate
 *.zip
 *.sha256
+SHA256SUMS
 ravenne-256.png
 _*.tmp
 tools/monero/wallets/

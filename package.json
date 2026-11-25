@@ -1,6 +1,6 @@
 {
   "name": "ravenne-wallet",
-  "version": "9.7.0",
+  "version": "9.8.0",
   "description": "Encrypted, 100% local terminal wallet — EVM chains, Bitcoin and Monero. No server, no telemetry.",
   "main": "ravenne.js",
   "bin": { "ravenne": "ravenne.js" },
@@ -14,7 +14,10 @@
     "test": "node --test",
     "build": "build.bat",
     "icon": "node make-icon.mjs",
-    "check": "node --check ravenne.js"
+    "check": "node --check ravenne.js",
+    "keygen": "node scripts/sign-release.mjs --init",
+    "sign": "node scripts/sign-release.mjs",
+    "verify-sign": "node scripts/verify-release.mjs"
   },
   "keywords": ["wallet", "crypto", "bitcoin", "ethereum", "monero", "terminal", "privacy"],
   "author": "ravennelucas1908-max",

@@ -27,7 +27,8 @@ Monero — no account, no server, no telemetry, no activation.
   mainnet/testnet.
 - **Monero** — keys generated locally, optional wallet engine.
 - **Security** — Argon2id master password, AES-256-GCM vault padded to 4 KiB
-  buckets, TOTP 2FA, duress (decoy) vault, persistent lockout, 3-pass wipe.
+  buckets, **atomic writes + `.bak` + `ravenne recover`**, TOTP 2FA, duress
+  (decoy) vault, persistent lockout, 3-pass wipe.
 - **Privacy** — persistent proxy/Tor, RPC rotation, query jitter, private
   broadcast (Flashbots + MEV Blocker), custom Esplora, BTC coin control,
   private hop, address-reuse guard, sends blocked without a tunnel.
@@ -85,6 +86,17 @@ Home → Privacy.
 
 Details, limits and the full workflow: **[English manual](MANUAL.en.md)** /
 **[manuel français](MANUAL.fr.md)**.
+
+## Verify a release
+
+Signed with Ed25519. Fingerprint:
+
+`1e:25:f2:cf:c7:59:54:78:3c:0e:48:9a:ba:0c:cf:bf:70:ef:36:e0:65:66:75:de:82:cc:82:e1:1d:31:c7:b2`
+
+```powershell
+node scripts/verify-release.mjs SHA256SUMS release-key.pub
+Get-FileHash ravenne-wallet-vX.Y.Z.zip -Algorithm SHA256
+```
 
 ## Tests
 

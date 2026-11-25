@@ -1,6 +1,6 @@
 # Ravenne Wallet — User Manual (English)
 
-Version 9.7.0 · Windows · Node.js 18+ · MIT license
+Version 9.8.0 · Windows · Node.js 18+ · MIT license
 
 Ravenne is a **100% local, 100% terminal** crypto wallet. No account, no
 server, no telemetry, **no activation**. All keys stay on your machine,
@@ -260,6 +260,7 @@ settings requireproxy on|off
 ```
 backup [file]               encrypted vault copy
 restore <file>
+recover [file]              restore the automatic .bak if the vault is corrupt
 usbbackup <folder>
 usbrestore <folder>
 ```
@@ -393,6 +394,9 @@ out of scope.
 ## 9. Backups
 
 - MAIN seed on **paper or metal**, BIP39 passphrase stored separately.
+- **Atomic writes**: vault written to a temp file, fsynced, then renamed. A crash cannot truncate it.
+- **Automatic `.bak`**: the previous version is kept. On unlock, if the main file is unreadable, Ravenne tries the `.bak` and restores it (the broken file stays as `.corrupt-*`).
+- `ravenne recover`: explicit restore from the `.bak`.
 - `ravenne backup`: encrypted vault copy, store offline.
 - `ravenne usbbackup E:\`: vault + secure vault + gate + proxy config.
 - Test a restore before you need it.
@@ -446,7 +450,7 @@ exclusions.
 ## 12. Tests, build, license
 
 ```powershell
-npm test       # node:test — 13 tests
+npm test       # node:test — 15 tests
 .\build.bat    # exe + zip
 ```
 

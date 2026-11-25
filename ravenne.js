@@ -26,7 +26,7 @@ import { HDKey } from "@scure/bip32";
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
-const VERSION = "9.7.0";
+const VERSION = "9.8.0";
 process.title = "Ravenne Wallet";
 
 /* Network-layer privacy: route ALL outgoing HTTP (RPC, explorers, prices)
@@ -36,11 +36,11 @@ process.title = "Ravenne Wallet";
 let PROXY = null;
 const netCfgFile = () => path.join(HERE, "net.ravenne.json");
 function netConfig() {
-  try { return JSON.parse(fs.readFileSync(netCfgFile(), "utf8")); } catch { return null; }
+  return readJsonResilient(netCfgFile()).data;
 }
 function writeNetConfig(cfg) {
   if (!cfg) { try { fs.unlinkSync(netCfgFile()); } catch {} return; }
-  fs.writeFileSync(netCfgFile(), JSON.stringify(cfg, null, 2));
+  atomicWriteFile(netCfgFile(), JSON.stringify(cfg, null, 2));
   hardenFile(netCfgFile());
 }
 const envProxy = () =>
@@ -453,18 +453,19 @@ const deriveKey = (pass, salt, meta = KDF2) =>
   meta?.kdf === "argon2id" ? kdfArgon(pass, salt, meta) : kdfScrypt(pass, salt);
 function writeGate(pass) {
   let keep = {};
-  try { const old = JSON.parse(fs.readFileSync(GATE_FILE, "utf8")); keep = { totp: old.totp, duress: old.duress }; } catch {}
+  try { const old = readJsonResilient(GATE_FILE).data || {}; keep = { totp: old.totp, duress: old.duress }; } catch {}
   const salt = crypto.randomBytes(16);
   const meta = { v: 2, ...KDF2, salt: salt.toString("hex"), hash: kdfArgon(pass, salt).toString("hex") };
   if (keep.totp) meta.totp = keep.totp;
   if (keep.duress) meta.duress = keep.duress;
-  fs.writeFileSync(GATE_FILE, JSON.stringify(meta, null, 2));
+  atomicWriteFile(GATE_FILE, JSON.stringify(meta, null, 2));
   hardenFile(GATE_FILE);
 }
 function gateVerify(pass) {
   if (!fs.existsSync(GATE_FILE)) return false;
   try {
-    const g = JSON.parse(fs.readFileSync(GATE_FILE, "utf8"));
+    const { data: g } = readJsonResilient(GATE_FILE);
+    if (!g) return false;
     const want = Buffer.from(g.hash, "hex");
     const got = deriveKey(pass, Buffer.from(g.salt, "hex"), g);
     const ok = want.length === got.length && crypto.timingSafeEqual(got, want);
@@ -647,6 +648,27 @@ function hardenFile(p) {
   } catch { /* best effort */ }
 }
 
+/* Atomic write: fsync a temp file, keep the previous version as .bak,
+   then rename over the target. A crash mid-write can never truncate the
+   real vault. */
+function atomicWriteFile(file, data) {
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+  const fd = fs.openSync(tmp, "w");
+  try { fs.writeSync(fd, data); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  if (fs.existsSync(file)) {
+    try { fs.copyFileSync(file, file + ".bak"); hardenFile(file + ".bak"); } catch {}
+  }
+  fs.renameSync(tmp, file);
+  hardenFile(file);
+}
+function readJsonResilient(file) {
+  try { return { data: JSON.parse(fs.readFileSync(file, "utf8")), recovered: false }; }
+  catch {
+    try { return { data: JSON.parse(fs.readFileSync(file + ".bak", "utf8")), recovered: true }; }
+    catch { return { data: null, recovered: false }; }
+  }
+}
+
 /* ---------- Encrypted vault (AES-256-GCM) ---------- */
 const PAD_BUCKET = 4096;
 /* Pad the plaintext to fixed buckets so the ciphertext length does not reveal
@@ -661,7 +683,7 @@ export function encryptVault(payload, pass, file = VAULT_FILE) {
   const salt = crypto.randomBytes(16), iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", kdfArgon(pass, salt), iv);
   const data = Buffer.concat([cipher.update(paddedJson(payload), "utf8"), cipher.final()]);
-  fs.writeFileSync(file, JSON.stringify({
+  atomicWriteFile(file, JSON.stringify({
     app: "ravenne", v: 8, ...KDF2,
     salt: salt.toString("hex"), iv: iv.toString("hex"),
     tag: cipher.getAuthTag().toString("hex"), data: data.toString("base64"),
@@ -674,6 +696,17 @@ export function decryptVault(pass, file = VAULT_FILE) {
   const d = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(meta.iv, "hex"));
   d.setAuthTag(Buffer.from(meta.tag, "hex"));
   return JSON.parse(Buffer.concat([d.update(Buffer.from(meta.data, "base64")), d.final()]).toString("utf8"));
+}
+/* Try the main vault, then its .bak. Never deletes anything. */
+export function loadVaultResilient(pass, file = VAULT_FILE) {
+  try { return { payload: decryptVault(pass, file), recovered: false, source: file }; }
+  catch (e) {
+    const bak = file + ".bak";
+    if (fs.existsSync(bak)) {
+      try { return { payload: decryptVault(pass, bak), recovered: true, source: bak }; } catch {}
+    }
+    throw e;
+  }
 }
 const emptyProfile = name => ({ name, wallets: [], btcWallets: [], xmrWallets: [], history: [], chainTx: [], network: "eth" });
 
@@ -847,8 +880,20 @@ async function pickProfile() {
 function ensureVault() {
   if (state.payload) return;
   if (fs.existsSync(ACTIVE_VAULT)) {
-    try { state.payload = decryptVault(state.pass, ACTIVE_VAULT); }
-    catch { console.log(c.err("Vault password differs from the master password (gate changed?). Use: ravenne changepass")); process.exit(1); }
+    try {
+      const res = loadVaultResilient(state.pass, ACTIVE_VAULT);
+      state.payload = res.payload;
+      if (res.recovered) {
+        try { fs.copyFileSync(ACTIVE_VAULT, `${ACTIVE_VAULT}.corrupt-${Date.now()}`); } catch {}
+        try { fs.copyFileSync(res.source, ACTIVE_VAULT); } catch {}
+        hardenFile(ACTIVE_VAULT);
+        console.log(c.warn("Vault restored from its .bak (the previous file was kept as .corrupt-*)."));
+      }
+    } catch {
+      console.log(c.err("Vault cannot be decrypted (wrong password or corrupted file)."));
+      console.log(c.dim("  Try: ravenne recover"));
+      process.exit(1);
+    }
   } else {
     state.payload = { profiles: { default: emptyProfile("default") }, active: "default", settings: structuredClone(DEFAULT_SETTINGS) };
     save();
@@ -2787,19 +2832,39 @@ const vaultState = { pass: null, data: null };
 
 function secEncrypt(data, pass) {
   const salt = crypto.randomBytes(16), iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", kdf(pass, salt), iv);
-  const ct = Buffer.concat([cipher.update(JSON.stringify(data), "utf8"), cipher.final()]);
-  fs.writeFileSync(SEC_PATH, JSON.stringify({
-    app: "ravenne-secure", v: 2, salt: salt.toString("hex"), iv: iv.toString("hex"),
+  const cipher = crypto.createCipheriv("aes-256-gcm", kdfArgon(pass, salt), iv);
+  const ct = Buffer.concat([cipher.update(paddedJson(data), "utf8"), cipher.final()]);
+  atomicWriteFile(SEC_PATH, JSON.stringify({
+    app: "ravenne-secure", v: 3, ...KDF2,
+    salt: salt.toString("hex"), iv: iv.toString("hex"),
     tag: cipher.getAuthTag().toString("hex"), data: ct.toString("base64"),
   }, null, 2));
-  hardenFile(SEC_PATH);
 }
 function secDecrypt(pass) {
   const meta = JSON.parse(fs.readFileSync(SEC_PATH, "utf8"));
-  const d = crypto.createDecipheriv("aes-256-gcm", kdf(pass, Buffer.from(meta.salt, "hex")), Buffer.from(meta.iv, "hex"));
+  const d = crypto.createDecipheriv("aes-256-gcm", deriveKey(pass, Buffer.from(meta.salt, "hex"), meta), Buffer.from(meta.iv, "hex"));
   d.setAuthTag(Buffer.from(meta.tag, "hex"));
   return JSON.parse(Buffer.concat([d.update(Buffer.from(meta.data, "base64")), d.final()]).toString("utf8"));
+}
+function secDecryptResilient(pass) {
+  try { return secDecrypt(pass); }
+  catch (e) {
+    const bak = SEC_PATH + ".bak";
+    if (fs.existsSync(bak)) {
+      try {
+        const meta = JSON.parse(fs.readFileSync(bak, "utf8"));
+        const d = crypto.createDecipheriv("aes-256-gcm", deriveKey(pass, Buffer.from(meta.salt, "hex"), meta), Buffer.from(meta.iv, "hex"));
+        d.setAuthTag(Buffer.from(meta.tag, "hex"));
+        const data = JSON.parse(Buffer.concat([d.update(Buffer.from(meta.data, "base64")), d.final()]).toString("utf8"));
+        try { fs.copyFileSync(SEC_PATH, `${SEC_PATH}.corrupt-${Date.now()}`); } catch {}
+        fs.copyFileSync(bak, SEC_PATH);
+        hardenFile(SEC_PATH);
+        console.log(c.warn("Secure vault restored from its .bak."));
+        return data;
+      } catch {}
+    }
+    throw e;
+  }
 }
 async function vaultOpen() {
   if (vaultState.data) return vaultState.data;
@@ -2818,7 +2883,7 @@ async function vaultOpen() {
   }
   const pw = await P({ type: "password", name: "p", message: "VAULT password (separate from the master password):" });
   vaultState.pass = pw.p;
-  vaultState.data = secDecrypt(pw.p);
+  vaultState.data = secDecryptResilient(pw.p);
   return vaultState.data;
 }
 function secDerive(w) {
@@ -2933,10 +2998,10 @@ const totpCode = (secretB32, offset = 0) => {
   return String((h.readUInt32BE(o) & 0x7fffffff) % 1000000).padStart(6, "0");
 };
 function gateMeta() {
-  try { return JSON.parse(fs.readFileSync(GATE_FILE, "utf8")); } catch { return { v: 1 }; }
+  return readJsonResilient(GATE_FILE).data || { v: 2 };
 }
 function gateWriteMeta(meta) {
-  fs.writeFileSync(GATE_FILE, JSON.stringify(meta, null, 2));
+  atomicWriteFile(GATE_FILE, JSON.stringify(meta, null, 2));
   hardenFile(GATE_FILE);
 }
 async function totpChallenge() {
@@ -3238,7 +3303,7 @@ async function simpleMenu() {
       { title: "Harden privacy profile", value: "harden",
         description: "One pass: proxy, jitter, rotation, private tx, clearnet off." },
       { title: "Settings", value: "set",
-        description: "Proxy, VPN, jitter, broadcast, auto-lock." },
+        description: "Network, privacy, wallet and security." },
       { title: "Security & backups", value: "sec",
         description: "Seeds, export, backup, password, wipe." },
       { title: "Advanced mode", value: "adv",
@@ -3302,6 +3367,8 @@ async function securityMenu() {
           description: "Encrypted copy of the whole vault — store it on a USB stick or cloud drive." },
         { title: "Restore the vault from a backup", value: "restore",
           description: "Replace the current vault with a backup file (same master password only)." },
+        { title: "Recover from .bak (corrupted vault)", value: "recover",
+          description: "If the main vault is unreadable, restore the automatic .bak copy." },
         { title: "Reveal the RECEIVING seed (hot, inside vault)", value: "rseed",
           description: "The seed controlling all receiving wallets — for paper backup." },
         { title: "Reveal the MAIN seed (only if stored in vault)", value: "mseed",
@@ -3312,15 +3379,22 @@ async function securityMenu() {
           description: "Reveal one wallet's private key — full access, handle with extreme care." },
         { title: "Change master password", value: "pass",
           description: "Re-encrypts gate and vault with a new password." },
+        { title: "2FA (TOTP)", value: "2fa",
+          description: "Require a rotating code from an authenticator app at unlock." },
+        { title: "Duress vault (decoy)", value: "duress",
+          description: "A second password opens a plausible empty vault." },
+        { title: "Secure wipe", value: "wipe",
+          description: "3-pass overwrite + delete (requires typing ERASE)." },
         { title: "Privacy notes — what this protects against", value: "priv",
           description: "Honest summary of the privacy model and its limits." },
-        { title: "←  Back", value: "back" },
+        { title: "Back", value: "back" },
       ],
     });
     if (a === "back") return;
     try {
       if (a === "backup") await cmdBackup([]);
       else if (a === "restore") await cmdRestore([(await P({ type: "text", name: "f", message: "Backup file path:" })).f]);
+      else if (a === "recover") await cmdRecover([]);
       else if (a === "rawkey") await cmdExportKey([]);
       if (a === "rseed") {
         console.log(c.warn("\n!  This seed controls ALL receiving wallets (funds waiting to be forwarded):"));
@@ -3334,6 +3408,15 @@ async function securityMenu() {
         if (!m?.privateKey) console.log(c.warn("\nMain is watch-only — nothing to export."));
         else await cmdExport([String(W().indexOf(m))]);
       } else if (a === "pass") await cmdChangePass();
+      else if (a === "2fa") {
+        const { v } = await P({ type: "select", name: "v", message: "2FA:",
+          choices: [{ title: "Status", value: "status" }, { title: "Enable", value: "on" }, { title: "Disable", value: "off" }] });
+        await cmdTwofa(v === "status" ? [] : [v]);
+      } else if (a === "duress") {
+        const { v } = await P({ type: "select", name: "v", message: "Duress vault:",
+          choices: [{ title: "Status", value: "status" }, { title: "Enable / change", value: "on" }, { title: "Disable", value: "off" }] });
+        await cmdDuress(v === "status" ? [] : [v]);
+      } else if (a === "wipe") await cmdWipe([]);
       else if (a === "priv") box("PRIVACY — HONEST NOTES", [
         `✓ fresh receiving address per payer (no address reuse)`,
         `✓ main address never shown to payers`,
@@ -3391,6 +3474,25 @@ async function cmdRestore(args) {
   fs.copyFileSync(src, VAULT_FILE);
   state.payload = decryptVault(state.pass);
   console.log(c.ok(`✓ Vault restored: ${W().length} EVM + ${BW().length} BTC wallets, ${cur().history.length} tx history.`));
+}
+async function cmdRecover(args) {
+  header("VAULT RECOVERY");
+  const file = args[0] ? path.resolve(args[0]) : ACTIVE_VAULT;
+  if (!fs.existsSync(file)) throw new Error(`Not found: ${file}`);
+  try { decryptVault(state.pass, file); return console.log(c.ok(`✓ ${path.basename(file)} decrypts fine — nothing to do.`)); }
+  catch (e) { console.log(c.warn(`Main file unreadable: ${e.message.slice(0, 70)}`)); }
+  const bak = file + ".bak";
+  if (!fs.existsSync(bak)) return console.log(c.err("No .bak next to it — nothing to recover automatically."));
+  let payload;
+  try { payload = decryptVault(state.pass, bak); }
+  catch { return console.log(c.err("The .bak exists but does not decrypt with this password.")); }
+  console.log(c.ok(`✓ .bak decrypts (${(payload.profiles ? Object.keys(payload.profiles).length : 0)} profile(s)).`));
+  if (!(await confirm(`Restore ${path.basename(bak)} over ${path.basename(file)}?`))) return console.log("Cancelled.");
+  try { fs.copyFileSync(file, `${file}.corrupt-${Date.now()}`); } catch {}
+  fs.copyFileSync(bak, file);
+  hardenFile(file);
+  if (file === ACTIVE_VAULT) state.payload = payload;
+  console.log(c.ok("Vault restored. Restart Ravenne."));
 }
 async function cmdExportKey(args) {
   let a = args[0];
@@ -3585,71 +3687,50 @@ async function cmdCheck() {
   if (advice.length) { console.log(c.dim("\n  To improve anonymity:")); advice.forEach(l => console.log(c.dim(l))); }
   console.log(c.dim("\n  ravenne proxy <url> · ravenne settings prices off · ravenne rpc <chain> <url>"));
 }
-async function quickSettings() {
-  const s = settings();
+async function networkSettings() {
   while (true) {
-    const { a } = await P({ type: "select", name: "a", message: "Settings:", choices: [
+    const s = settings();
+    const { a } = await P({ type: "select", name: "a", message: "Network & proxy:", choices: [
       { title: `Proxy: ${PROXY || "none"}`, value: "proxyurl",
-        description: "Set the HTTP proxy used for ALL traffic (Tor/Privoxy/VPN box)." },
+        description: "HTTP proxy for ALL traffic (Tor/Privoxy/VPN box)." },
       { title: "Test proxy connection", value: "proxytest",
-        description: "Send one request through the configured proxy and report success." },
+        description: "Send one request through the configured proxy." },
       { title: "Auto-detect local Tor/Privoxy", value: "tor",
         description: "Probe 8118/9050/9150 and enable the HTTP proxy if found." },
-      { title: `Require proxy: ${netConfig()?.requireProxy ? "ON" : "OFF"}`, value: "reqproxy",
-        description: "Refuse to start without an HTTP proxy (Tor/Privoxy/VPN box). Fail closed." },
-      { title: "Harden privacy profile", value: "harden",
-        description: "Apply proxy/jitter/rotation/private tx/clearnet-off in one pass." },
+      { title: `Require proxy at startup: ${netConfig()?.requireProxy ? "ON" : "OFF"}`, value: "reqproxy",
+        description: "Refuse to start without a proxy. Fail closed." },
       { title: `VPN check: ${s.vpnCheck ? "ON" : "OFF"}`, value: "vpn",
-        description: "Refuse to connect without an active anonymity VPN (WireGuard, Proton, Nord…)." },
+        description: "Refuse to connect without an anonymity VPN." },
       { title: `VPN fail-closed: ${s.vpnFailClosed !== false ? "ON" : "OFF"}`, value: "failclosed",
-        description: "If adapters cannot be inspected, BLOCK instead of assuming you are protected." },
-      { title: `Broadcast: ${(s.privacy?.broadcast || "auto") === "rpc" ? "public RPC" : "private (ETH)"}`, value: "bcast",
-        description: "Private = sent through Flashbots/MEV Blocker, never the public mempool." },
-      { title: `Clearnet sends: ${s.privacy?.allowClearnetSend ? "ALLOWED" : "blocked"}`, value: "clearnet",
-        description: "Blocked = refuses to send while no proxy/Tor is active." },
-      { title: `BTC API: ${s.btcApi ? "custom" : "Blockstream public"}`, value: "btcapi",
-        description: "Point to your own Esplora/mempool so one third party doesn't see all your addresses." },
-      { title: `Monero daemon: ${s.xmrDaemon || "default (clearnet)"}`, value: "xmrnode",
-        description: "Use your own monerod instead of the public default." },
+        description: "Block when adapters cannot be inspected." },
+      { title: `Mesh VPN accepted: ${s.meshVpnOk ? "YES" : "NO"}`, value: "mesh",
+        description: "Radmin/Hamachi/ZeroTier do NOT hide your traffic." },
       { title: `Custom RPC: ${Object.keys(s.rpc).length} chain(s)`, value: "rpc",
-        description: "Point a chain at your own node (IP privacy)." },
-      { title: `Mesh VPN counts as VPN: ${s.meshVpnOk ? "YES" : "NO"}`, value: "mesh",
-        description: "Let Radmin/Hamachi/ZeroTier-style LAN VPNs satisfy the check. They do NOT hide your traffic." },
-      { title: `Price lookups: ${s.prices ? "ON" : "OFF"}`, value: "prices",
-        description: "Fiat values via CoinGecko — OFF means zero calls to price providers (better privacy)." },
-      { title: `Auto-lock: ${s.autolockMin} min`, value: "lock",
-        description: "Menu re-asks the master password after this idle time (0 = never)." },
-      { title: `RPC rotation: ${s.privacy?.rpcRotation !== false ? "ON" : "OFF"}`, value: "rot",
-        description: "Each query picks a random free RPC — no single provider sees all your addresses." },
-      { title: `Query jitter: ${s.privacy?.queryJitter ? "ON" : "OFF"}`, value: "jit",
-        description: "Random small delays between address lookups (slower, breaks burst correlation)." },
-      { title: `Sweep threshold: ${s.privacy.sweepFeeMult ?? 3}× fee`, value: "sweepfee",
-        description: "Receiving wallets are forwarded once they hold more than fee × this number." },
-      { title: `Convert on forward: ${s.convert?.eth ? `${s.convert.eth.from} → ${s.convert.eth.to}` : "off"}`, value: "convert",
-        description: "Swap incoming funds via Uniswap BEFORE they reach the main wallet (Ethereum)." },
-      { title: "←  Back", value: "back" },
+        description: "Point a chain at your own node." },
+      { title: `BTC API: ${s.btcApi ? "custom" : "Blockstream public"}`, value: "btcapi",
+        description: "Your own Esplora/mempool." },
+      { title: `Monero daemon: ${s.xmrDaemon || "default (clearnet)"}`, value: "xmrnode",
+        description: "Your own monerod." },
+      { title: "Back", value: "back" },
     ]});
     if (a === "back") return;
     try {
       if (a === "proxyurl") {
         const { u } = await P({ type: "text", name: "u", initial: PROXY || "",
           message: "Proxy URL (http://127.0.0.1:8118 — empty = clear):" });
-        if (!u) {
-          await applyProxy(null);
-          console.log(c.ok("✓ Proxy cleared."));
-        } else if (!/^https?:\/\//.test(String(u).trim())) {
-          console.log(c.err("✗ Proxy URL must start with http:// or https://"));
-        } else {
+        if (!u) { await applyProxy(null); console.log(c.ok("✓ Proxy cleared.")); }
+        else if (!/^https?:\/\//.test(String(u).trim())) console.log(c.err("✗ URL must start with http:// or https://"));
+        else {
           await applyProxy(String(u).trim());
           const ok = await spin("Testing proxy…", async () => {
             const r = await fetch("https://example.com", { signal: AbortSignal.timeout(8000) });
             return r.ok;
           }).catch(() => false);
-          console.log(ok ? c.ok("✓ Proxy saved and working.") : c.warn("✓ Proxy saved — but the test failed (is Tor/Privoxy running?)."));
+          console.log(ok ? c.ok("✓ Proxy saved and working.") : c.warn("✓ Saved — test failed (is Tor/Privoxy running?)."));
         }
       }
       if (a === "proxytest") {
-        if (!PROXY) { console.log(c.warn("No proxy configured.")); }
+        if (!PROXY) console.log(c.warn("No proxy configured."));
         else {
           const ok = await spin("Testing proxy…", async () => {
             const r = await fetch("https://example.com", { signal: AbortSignal.timeout(8000) });
@@ -3659,76 +3740,143 @@ async function quickSettings() {
         }
       }
       if (a === "tor") await cmdTor([]);
-      if (a === "harden") await cmdHarden();
-      if (a === "xmrnode") {
-        const { u } = await P({ type: "text", name: "u", initial: s.xmrDaemon || "",
-          message: "monerod URL (empty = default public node):" });
-        if (!u) { delete s.xmrDaemon; save(); console.log(c.ok("✓ XMR daemon → default")); }
-        else {
-          s.xmrDaemon = String(u).trim().replace(/\/json_rpc\/?$/, ""); save();
-          const h = await spin("Testing daemon…", () => xmrDaemonHeight()).catch(() => null);
-          console.log(h ? c.ok(`✓ XMR daemon reachable (height ${h})`) : c.warn("✓ Saved — daemon did not answer yet."));
-        }
+      if (a === "reqproxy") {
+        const cfg = netConfig() || {};
+        writeNetConfig({ ...cfg, requireProxy: !cfg.requireProxy });
+        console.log(c.ok(`✓ requireProxy ${!cfg.requireProxy ? "ON" : "OFF"}`));
       }
+      if (a === "vpn") { s.vpnCheck = !s.vpnCheck; save(); console.log(c.ok(`✓ VPN check ${s.vpnCheck ? "on" : "off"}`)); }
+      if (a === "failclosed") { s.vpnFailClosed = s.vpnFailClosed === false; save();
+        console.log(c.ok(`✓ fail-closed ${s.vpnFailClosed ? "on" : "off"}`)); }
+      if (a === "mesh") { s.meshVpnOk = !s.meshVpnOk; save(); console.log(c.ok(`✓ mesh VPN ${s.meshVpnOk ? "accepted" : "rejected"}`)); }
       if (a === "rpc") {
         const { k } = await P({ type: "select", name: "k", message: "Which chain?",
           choices: Object.keys(NET).map(x => ({ title: NET[x].label, value: x })) });
         const { u } = await P({ type: "text", name: "u", initial: s.rpc[k] || "",
-          message: "RPC URL (empty = reset to default):" });
-        if (!u) { delete s.rpc[k]; save(); console.log(c.ok(`✓ ${NET[k].label} → default RPC`)); }
-        else if (!/^https?:\/\//.test(String(u).trim())) console.log(c.err("✗ RPC URL must start with http:// or https://"));
+          message: "RPC URL (empty = default):" });
+        if (!u) { delete s.rpc[k]; save(); console.log(c.ok(`✓ ${NET[k].label} → default`)); }
+        else if (!/^https?:\/\//.test(String(u).trim())) console.log(c.err("✗ URL must start with http:// or https://"));
         else { s.rpc[k] = String(u).trim(); save(); console.log(c.ok(`✓ ${NET[k].label} → ${s.rpc[k]}`)); }
       }
-      if (a === "vpn") { s.vpnCheck = !s.vpnCheck; save(); console.log(c.ok(`✓ VPN check ${s.vpnCheck ? "enabled" : "DISABLED"}`)); }
-      if (a === "failclosed") { s.vpnFailClosed = s.vpnFailClosed === false ? true : false; save();
-        console.log(c.ok(`✓ VPN gate fail-closed ${s.vpnFailClosed ? "ON" : "OFF"}`)); }
-      if (a === "reqproxy") {
-        const cfg = netConfig() || {};
-        writeNetConfig({ ...cfg, requireProxy: !cfg.requireProxy });
-        console.log(c.ok(`✓ requireProxy ${!cfg.requireProxy ? "ON (refuses to start without proxy)" : "OFF"}`));
+      if (a === "btcapi") {
+        const { u } = await P({ type: "text", name: "u", initial: s.btcApi || "",
+          message: "Esplora URL (empty = Blockstream public):" });
+        if (!u) { delete s.btcApi; save(); console.log(c.ok("✓ BTC API → Blockstream")); }
+        else { s.btcApi = String(u).trim().replace(/\/$/, ""); save(); console.log(c.ok(`✓ BTC API → ${s.btcApi}`)); }
       }
+      if (a === "xmrnode") {
+        const { u } = await P({ type: "text", name: "u", initial: s.xmrDaemon || "",
+          message: "monerod URL (empty = default):" });
+        if (!u) { delete s.xmrDaemon; save(); console.log(c.ok("✓ XMR daemon → default")); }
+        else {
+          s.xmrDaemon = String(u).trim().replace(/\/json_rpc\/?$/, ""); save();
+          const h = await spin("Testing daemon…", () => xmrDaemonHeight()).catch(() => null);
+          console.log(h ? c.ok(`✓ reachable (height ${h})`) : c.warn("✓ saved — no answer yet"));
+        }
+      }
+    } catch (e) { console.log(c.err(`✗ ${e.message}`)); }
+  }
+}
+
+async function privacySettings() {
+  while (true) {
+    const s = settings();
+    const { a } = await P({ type: "select", name: "a", message: "Privacy:", choices: [
+      { title: "Harden privacy profile", value: "harden", description: "Apply the full profile in one pass." },
+      { title: `Broadcast: ${(s.privacy?.broadcast || "auto") === "rpc" ? "public RPC" : "private (ETH)"}`, value: "bcast",
+        description: "Private relays vs public mempool." },
+      { title: `Clearnet sends: ${s.privacy?.allowClearnetSend ? "ALLOWED" : "blocked"}`, value: "clearnet",
+        description: "Blocked = no send without a tunnel." },
+      { title: `Query jitter: ${s.privacy?.queryJitter ? "ON" : "OFF"}`, value: "jit",
+        description: "Random delays between lookups." },
+      { title: `RPC rotation: ${s.privacy?.rpcRotation !== false ? "ON" : "OFF"}`, value: "rot",
+        description: "Random endpoint per query." },
+      { title: `Price lookups: ${s.prices ? "ON" : "OFF"}`, value: "prices",
+        description: "CoinGecko sees your IP when ON." },
+      { title: `Sweep threshold: ${s.privacy.sweepFeeMult ?? 3}× fee`, value: "sweepfee",
+        description: "Forward when balance > fee × N." },
+      { title: `Convert on forward: ${s.convert?.eth ? `${s.convert.eth.from} → ${s.convert.eth.to}` : "off"}`, value: "convert",
+        description: "Swap before funds reach MAIN (Ethereum)." },
+      { title: "Open traceability dashboard", value: "dashboard", description: "What links you, layer by layer." },
+      { title: "Back", value: "back" },
+    ]});
+    if (a === "back") return;
+    try {
+      if (a === "harden") await cmdHarden();
       if (a === "bcast") {
         const next = (s.privacy?.broadcast || "auto") === "rpc" ? "private" : "rpc";
         (s.privacy ??= {}).broadcast = next; save();
-        console.log(c.ok(next === "rpc" ? "✓ Public RPC broadcast" : "✓ Private broadcast (Flashbots, ETH)"));
+        console.log(c.ok(next === "rpc" ? "✓ public RPC" : "✓ private relays (ETH)"));
       }
-      if (a === "clearnet") {
-        (s.privacy ??= {}).allowClearnetSend = !s.privacy.allowClearnetSend; save();
-        console.log(c.ok(`✓ Clearnet sends ${s.privacy.allowClearnetSend ? "ALLOWED" : "blocked"}`));
-      }
-      if (a === "btcapi") {
-        const { u } = await P({ type: "text", name: "u", message: "Esplora URL (empty = Blockstream public):" });
-        if (!u) { delete s.btcApi; save(); console.log(c.ok("✓ BTC API → Blockstream public")); }
-        else { s.btcApi = String(u).trim().replace(/\/$/, ""); save(); console.log(c.ok(`✓ BTC API : ${s.btcApi}`)); }
-      }
-      if (a === "mesh") { s.meshVpnOk = !s.meshVpnOk; save(); console.log(c.ok(`✓ Mesh VPNs ${s.meshVpnOk ? "now accepted (less private)" : "no longer accepted"}`)); }
-      if (a === "prices") { s.prices = !s.prices; save(); console.log(c.ok(`✓ Price lookups ${s.prices ? "enabled" : "disabled"}`)); }
-      if (a === "lock") {
-        const { m } = await P({ type: "number", name: "m", message: "Auto-lock minutes (0 = off):", initial: s.autolockMin, min: 0, max: 240 });
-        s.autolockMin = m; save(); console.log(c.ok(`✓ Auto-lock: ${m === 0 ? "off" : `${m} min`}`));
-      }
-      if (a === "rot") { s.privacy ??= {}; s.privacy.rpcRotation = s.privacy.rpcRotation === false ? true : false; save();
-        console.log(c.ok(`✓ RPC rotation ${s.privacy.rpcRotation === false ? "OFF" : "ON"}`)); }
-      if (a === "jit") { s.privacy ??= {}; s.privacy.queryJitter = !s.privacy.queryJitter; save();
-        console.log(c.ok(`✓ Query jitter ${s.privacy.queryJitter ? "ON" : "OFF"}`)); }
+      if (a === "clearnet") { (s.privacy ??= {}).allowClearnetSend = !s.privacy.allowClearnetSend; save();
+        console.log(c.ok(`✓ clearnet sends ${s.privacy.allowClearnetSend ? "ALLOWED" : "blocked"}`)); }
+      if (a === "jit") { (s.privacy ??= {}).queryJitter = !s.privacy.queryJitter; save();
+        console.log(c.ok(`✓ jitter ${s.privacy.queryJitter ? "on" : "off"}`)); }
+      if (a === "rot") { (s.privacy ??= {}).rpcRotation = s.privacy.rpcRotation === false; save();
+        console.log(c.ok(`✓ rotation ${s.privacy.rpcRotation ? "on" : "off"}`)); }
+      if (a === "prices") { s.prices = !s.prices; save(); console.log(c.ok(`✓ prices ${s.prices ? "on" : "off"}`)); }
       if (a === "sweepfee") {
-        const { m } = await P({ type: "number", name: "m", message: "Forward when balance > fee × :", initial: s.privacy.sweepFeeMult ?? 3, min: 1, max: 100 });
-        s.privacy.sweepFeeMult = m; save(); console.log(c.ok(`✓ Sweep threshold: ${m}× fee`));
+        const { m } = await P({ type: "number", name: "m", initial: s.privacy.sweepFeeMult ?? 3, min: 1, max: 100,
+          message: "Forward when balance > fee × :" });
+        s.privacy.sweepFeeMult = m; save(); console.log(c.ok(`✓ threshold ${m}×`));
       }
       if (a === "convert") {
-        const { v } = await P({ type: "select", name: "v", message: "Convert incoming funds before forwarding:",
+        const { v } = await P({ type: "select", name: "v", message: "Convert before forwarding:",
           choices: [
-            { title: "Off — forward as-is", value: "off", description: "Whatever arrives (ETH or tokens) is forwarded unchanged." },
-            { title: "ETH → USDT", value: "ETH USDT", description: "Ether received is swapped to USDT before reaching main." },
-            { title: "ETH → USDC", value: "ETH USDC", description: "Ether received is swapped to USDC before reaching main." },
-            { title: "USDT → ETH", value: "USDT ETH", description: "Tether received (needs a little ETH for gas) is swapped to ETH." },
-            { title: "USDC → ETH", value: "USDC ETH", description: "USDC received (needs a little ETH for gas) is swapped to ETH." },
+            { title: "Off", value: "off" },
+            { title: "ETH → USDT", value: "ETH USDT" },
+            { title: "ETH → USDC", value: "ETH USDC" },
+            { title: "USDT → ETH", value: "USDT ETH" },
+            { title: "USDC → ETH", value: "USDC ETH" },
           ]});
-        if (v === "off") { (s.convert ??= {}); delete s.convert.eth; save(); console.log(c.ok("✓ Conversion off.")); }
+        if (v === "off") { (s.convert ??= {}); delete s.convert.eth; save(); console.log(c.ok("✓ conversion off")); }
         else { const [f, t] = v.split(" "); (s.convert ??= {}); s.convert.eth = { from: f, to: t }; save();
-               console.log(c.ok(`✓ Everything received on Ethereum will become ${t} before reaching main.`)); }
+          console.log(c.ok(`✓ incoming → ${t}`)); }
       }
+      if (a === "dashboard") await cmdPrivacy();
     } catch (e) { console.log(c.err(`✗ ${e.message}`)); }
+  }
+}
+
+async function walletSettings() {
+  while (true) {
+    const s = settings();
+    const { a } = await P({ type: "select", name: "a", message: "Wallet & display:", choices: [
+      { title: `Auto-lock: ${s.autolockMin} min`, value: "lock", description: "0 = never." },
+      { title: `Bitcoin network: ${s.btcTest ? "testnet" : "mainnet"}`, value: "btcnet", description: "Switch BTC mainnet/testnet." },
+      { title: "Show overview", value: "overview", description: "Print the balance dashboard now." },
+      { title: "Back", value: "back" },
+    ]});
+    if (a === "back") return;
+    try {
+      if (a === "lock") {
+        const { m } = await P({ type: "number", name: "m", initial: s.autolockMin, min: 0, max: 240,
+          message: "Auto-lock minutes (0 = off):" });
+        s.autolockMin = m; save(); console.log(c.ok(`✓ auto-lock ${m === 0 ? "off" : m + " min"}`));
+      }
+      if (a === "btcnet") { s.btcTest = !s.btcTest; save(); console.log(c.ok(`✓ Bitcoin ${s.btcTest ? "testnet" : "mainnet"}`)); }
+      if (a === "overview") await cmdOverview();
+    } catch (e) { console.log(c.err(`✗ ${e.message}`)); }
+  }
+}
+
+async function quickSettings() {
+  clearStep();
+  while (true) {
+    banner();
+    const { a } = await P({ type: "select", name: "a", message: "Settings:", choices: [
+      { title: "Network & proxy", value: "net", description: "Proxy, Tor, VPN, RPC, BTC API, XMR daemon." },
+      { title: "Privacy", value: "priv", description: "Harden, broadcast, clearnet, jitter, prices." },
+      { title: "Wallet & display", value: "wallet", description: "Auto-lock, Bitcoin network, overview." },
+      { title: "Security & backups", value: "sec", description: "Seeds, keys, backup, recover, password, wipe." },
+      { title: "Back to main menu", value: "back" },
+    ]});
+    if (a === "back") return;
+    if (a === "net") await networkSettings();
+    if (a === "priv") await privacySettings();
+    if (a === "wallet") await walletSettings();
+    if (a === "sec") await securityMenu();
+    clearStep();
   }
 }
 
@@ -4331,7 +4479,7 @@ const MENU_TITLES = {
   tokens: "ERC-20 tokens (balances, add, remove)", book: "Address book",
   "tx-prepare": "Offline: prepare unsigned tx", "tx-sign": "Offline: sign a tx file",
   "tx-broadcast": "Offline: broadcast a signed tx", network: "Switch chain", rpc: "RPC endpoints",
-  settings: "Settings (prices, VPN check, auto-lock)", changepass: "Change master password",
+  settings: "Settings (network, privacy, wallet, security)", changepass: "Change master password",
   twofa: "2FA (TOTP local - authenticator app)", duress: "Duress wallet (decoy vault)",
   harden: "Harden privacy profile",
   tor: "Route traffic through local Tor",
@@ -4522,6 +4670,7 @@ PRIVACY / SECURITY LAYERS
 MAINTENANCE
   backup [file]                Encrypted copy of the vault (store anywhere)
   restore <file>               Restore the vault from a backup
+  recover [file]               Restore the automatic .bak if the vault is corrupted
   export-key <n°>              Reveal a wallet's raw private key (careful!)
   check                        Diagnostics: VPN, proxy, RPC, privacy score
   privacy                      Traceability: tunnel, broadcast, used addresses
@@ -4633,7 +4782,7 @@ const ROUTES = {
   twofa: cmdTwofa, duress: cmdDuress, tor: cmdTor, proxy: cmdProxy, privacy: cmdPrivacy,
   harden: cmdHarden, hop: cmdHop, verify: cmdVerify,
   usbbackup: cmdUsbBackup, usbrestore: cmdUsbRestore,
-  backup: cmdBackup, restore: cmdRestore, "export-key": cmdExportKey, check: cmdCheck,
+  backup: cmdBackup, restore: cmdRestore, recover: cmdRecover, "export-key": cmdExportKey, check: cmdCheck,
   lock: async () => { await lockSession(false); console.log("Session locked — run a command to continue."); },
   wipe: cmdWipe,
   "tx-prepare": cmdTxPrepare, "tx-sign": cmdTxSign, "tx-broadcast": cmdTxBroadcast,
@@ -4701,6 +4850,7 @@ async function main() {
   if (!fn) { console.log(c.err(`Unknown command: ${args[0]}
 `)); console.log(HELP); process.exit(1); }
   await unlockGate();
+  if (args[0] === "recover") return cmdRecover(args.slice(1));
   ensureVault();
   await ensureVPN();
   if (state.flags.profile) {
@@ -4712,7 +4862,7 @@ async function main() {
 }
 
 /* Test hooks (pure helpers only — no wallet state required). */
-export const _internals = { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, utxoKey, liveUtxos };
+export const _internals = { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, utxoKey, liveUtxos, atomicWriteFile, readJsonResilient };
 
 /* Direct execution — including bundled .cjs and pkg .exe forms. */
 const isMain = (() => {

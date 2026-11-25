@@ -76,6 +76,7 @@ if errorlevel 1 (
 )
 if not exist ravenne-wallet-v%VER%.zip goto err
 powershell -NoProfile -Command "$h=(Get-FileHash -Algorithm SHA256 'ravenne-wallet-v%VER%.zip').Hash.ToLower(); \"$h  ravenne-wallet-v%VER%.zip\" | Set-Content 'ravenne-wallet-v%VER%.zip.sha256' -Encoding ascii"
+powershell -NoProfile -Command "$lines=@(); Get-ChildItem 'dist' -File | Sort-Object Name | ForEach-Object { $h=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(); $lines += ($h + '  ' + $_.Name) }; $z=Get-FileHash 'ravenne-wallet-v%VER%.zip' -Algorithm SHA256; $lines += ($z.Hash.ToLower() + '  ravenne-wallet-v%VER%.zip'); $lines | Set-Content 'SHA256SUMS' -Encoding ascii"
 
 echo.
 echo   ============================================

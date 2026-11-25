@@ -9,11 +9,11 @@ import crypto from "node:crypto";
 import * as bitcoin from "bitcoinjs-lib";
 
 import {
-  _internals, encryptVault, decryptVault, stripUsb,
+  _internals, encryptVault, decryptVault, loadVaultResilient, stripUsb,
   btcAddressFromPhrase, btcChangeFromPhrase, buildBtcTx, mergeChainTx,
 } from "../ravenne.js";
 
-const { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, liveUtxos } = _internals;
+const { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, liveUtxos, atomicWriteFile, readJsonResilient } = _internals;
 
 const tmp = () => path.join(os.tmpdir(), `ravenne-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
 
@@ -62,8 +62,33 @@ test("vault encrypt/decrypt round-trip and wrong password fails", () => {
   fs.unlinkSync(file);
 });
 
-test("legacy scrypt vaults still decrypt and keep working", () => {
+test("atomic write keeps a .bak and leaves no temp file", () => {
   const file = tmp();
+  fs.writeFileSync(file, "one");
+  atomicWriteFile(file, "two");
+  assert.equal(fs.readFileSync(file, "utf8"), "two");
+  assert.equal(fs.readFileSync(file + ".bak", "utf8"), "one");
+  const leftovers = fs.readdirSync(path.dirname(file)).filter(n => n.startsWith("." + path.basename(file)) && n.endsWith(".tmp"));
+  assert.equal(leftovers.length, 0);
+  fs.rmSync(file); fs.rmSync(file + ".bak");
+});
+
+test("corrupted vault recovers from its .bak", () => {
+  const file = tmp();
+  const pass = "pw12345678";
+  const p1 = { profiles: { default: { wallets: [], btcWallets: [], xmrWallets: [], history: [], chainTx: [] } }, active: "default" };
+  const p2 = { ...p1, active: "other" };
+  encryptVault(p1, pass, file);          // no .bak yet
+  encryptVault(p2, pass, file);          // .bak = p1
+  fs.writeFileSync(file, "{broken");     // simulate a truncated write
+  assert.throws(() => decryptVault(pass, file));
+  const r = loadVaultResilient(pass, file);
+  assert.equal(r.recovered, true);
+  assert.deepEqual(r.payload, p1);
+  fs.rmSync(file); fs.rmSync(file + ".bak");
+});
+
+test("legacy scrypt vaults still decrypt and keep working", () => {  const file = tmp();
   const pass = "legacy-password";
   const salt = crypto.randomBytes(16), iv = crypto.randomBytes(12);
   const key = crypto.scryptSync(pass, salt, 32, { N: 16384, r: 8, p: 1 });
