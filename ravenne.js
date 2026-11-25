@@ -19,6 +19,7 @@ import crypto from "node:crypto";
 import { argon2id } from "@noble/hashes/argon2";
 import { exec, execFileSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import readline from "node:readline";
 
 /* Bitcoin */
 import * as bitcoin from "bitcoinjs-lib";
@@ -26,7 +27,7 @@ import { HDKey } from "@scure/bip32";
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
-const VERSION = "9.8.0";
+const VERSION = "9.9.0";
 process.title = "Ravenne Wallet";
 
 /* Network-layer privacy: route ALL outgoing HTTP (RPC, explorers, prices)
@@ -254,11 +255,16 @@ async function P(questions) {
   for (const q of list) {
     let v;
     if (q.type === "select") {
-      v = await clack.select({
-        message: q.message,
-        options: (q.choices || []).map(ch => ({ value: ch.value, label: ch.title, hint: ch.description })),
-        initialValue: q.initial,
-      });
+      if (process.stdin.isTTY) {
+        v = await uiMenu({ message: q.message, choices: q.choices || [], header: q.header || [], initial: q.initial });
+        if (v === null) { clack.outro("Bye."); process.exit(0); }
+      } else {
+        v = await clack.select({
+          message: q.message,
+          options: (q.choices || []).map(ch => ({ value: ch.value, label: ch.title, hint: ch.description })),
+          initialValue: q.initial,
+        });
+      }
     } else if (q.type === "confirm") {
       /* sémantique conservée : défaut NON sauf initial===true (actions destructives) */
       v = await clack.select({
@@ -425,6 +431,89 @@ function statusLine() {
 function footer() {
   console.log(MARGIN + c.soft("up/down move   ·   enter select   ·   esc cancel"));
   console.log("");
+}
+
+if (TTY && process.stdin.isTTY) readline.emitKeypressEvents(process.stdin);
+
+/* Centered, scrollable menu drawn by Ravenne itself (not clack).
+   Returns the selected value, or null on Esc. */
+function uiMenu({ message, choices, header = [], initial = 0 }) {
+  return new Promise((resolve) => {
+    const stdin = process.stdin, stdout = process.stdout;
+    let idx = Math.max(0, choices.findIndex(ch => ch.value === initial));
+    let scroll = 0, visible = 1, done = false;
+    const cols = () => Math.max(40, stdout.columns || 80);
+    const rows = () => Math.max(14, stdout.rows || 30);
+    const pad = (s, w) => s + " ".repeat(Math.max(0, w - stripA(s).length));
+
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      stdin.removeListener("keypress", onKey);
+      stdout.removeListener("resize", render);
+      try { stdin.setRawMode(false); } catch {}
+      stdin.pause();
+      stdout.write("\x1b[2J\x1b[H");
+      resolve(val);
+    };
+
+    const onKey = (str, key = {}) => {
+      if (key.ctrl && key.name === "c") { finish(null); process.exit(0); }
+      if (key.name === "escape") {
+        const back = choices.find(ch => ["back", "__back", "__home"].includes(String(ch.value)));
+        return finish(back ? back.value : null);
+      }
+      if (key.name === "return" || key.name === "enter") return finish(choices[idx].value);
+      if (key.name === "up" || key.name === "k") idx = (idx - 1 + choices.length) % choices.length;
+      else if (key.name === "down" || key.name === "j") idx = (idx + 1) % choices.length;
+      else if (key.name === "pageup") idx = Math.max(0, idx - visible);
+      else if (key.name === "pagedown") idx = Math.min(choices.length - 1, idx + visible);
+      else if (key.name === "home") idx = 0;
+      else if (key.name === "end") idx = choices.length - 1;
+      else return;
+      render();
+    };
+
+    const render = () => {
+      const I = Math.min(76, cols() - 4);      // interior width
+      const tw = I - 2;                        // text width inside "│ "
+      const title = fit(message || "", I - 6);
+      const overhead = 7 + (header.length ? header.length + 1 : 0);
+      const maxItems = Math.max(3, rows() - overhead - 2);
+      visible = Math.min(choices.length, maxItems);
+      if (idx < scroll) scroll = idx;
+      if (idx >= scroll + visible) scroll = idx - visible + 1;
+      const above = scroll > 0, below = scroll + visible < choices.length;
+      const L = [];
+      L.push(c.soft("┌─ ") + c.bold(title) + " " +
+        c.soft("─".repeat(Math.max(0, I - stripA(title).length - 3))) + c.soft("┐"));
+      for (const h of header) L.push(c.soft("│") + " " + pad(fit(h, tw), tw) + " " + c.soft("│"));
+      if (header.length) L.push(c.soft("│") + " " + c.soft("─".repeat(tw)) + " " + c.soft("│"));
+      if (above) L.push(c.soft("│") + " " + c.soft(pad("  ↑ more", tw)) + " " + c.soft("│"));
+      for (let i = scroll; i < scroll + visible; i++) {
+        const label = fit(choices[i].title, tw - 4);
+        if (i === idx) L.push(c.soft("│") + " " + c.inv((" › " + label).padEnd(tw, " ")) + " " + c.soft("│"));
+        else L.push(c.soft("│") + " " + pad("   " + label, tw) + " " + c.soft("│"));
+      }
+      if (below) L.push(c.soft("│") + " " + c.soft(pad("  ↓ more", tw)) + " " + c.soft("│"));
+      L.push(c.soft("│") + " " + c.soft("─".repeat(tw)) + " " + c.soft("│"));
+      L.push(c.soft("│") + " " + c.soft(pad(fit(choices[idx]?.description || "", tw), tw)) + " " + c.soft("│"));
+      L.push(c.soft("└" + "─".repeat(I) + "┘"));
+
+      const top = Math.max(0, Math.floor((rows() - (L.length + 2)) / 2));
+      const left = Math.max(0, Math.floor((cols() - (I + 2)) / 2));
+      const ind = " ".repeat(left);
+      stdout.write("\x1b[2J\x1b[H" + "\n".repeat(top) +
+        L.map(l => ind + l).join("\n") + "\n" +
+        ind + c.soft("↑↓ move   ·   enter select   ·   esc cancel") + "\n");
+    };
+
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on("keypress", onKey);
+    stdout.on("resize", render);
+    render();
+  });
 }
 async function spin(label, fn) {
   if (!TTY) { console.log(c.dim(`* ${label}`)); return fn(); }
@@ -3260,6 +3349,29 @@ function renderDashboard(snap) {
   }
 }
 
+function homeHeader(snap) {
+  const k = netKey(), sym = NET[k].sym;
+  const totalEvm = snap.evm ? (snap.evm.main ?? 0n) + snap.evm.recv : null;
+  const fiat = snap.prices && totalEvm != null ? netValue(totalEvm, k, snap.prices) : null;
+  const mainTxt = !mainEvm() ? "not configured"
+    : snap.evm?.main != null ? `${fmtAmt(snap.evm.main)} ${sym}` : "offline";
+  const recvTxt = snap.evm ? `${fmtAmt(snap.evm.recv)} ${sym}` : "—";
+  const totalTxt = totalEvm != null ? `${fmtAmt(totalEvm)} ${sym}` + (fiat != null ? `  (${usd(fiat)})` : "") : "—";
+  const lines = [
+    `${V().active}  ·  ${N().label}  ·  ${W().length} EVM${BW().length ? ` + ${BW().length} BTC` : ""}`,
+    `main ${mainTxt}   ·   receiving ${recvTxt}   ·   total ${totalTxt}`,
+    [
+      PROXY ? c.ok("proxy on") : c.warn("no proxy"),
+      settings().vpnCheck !== false ? c.ok("vpn on") : c.soft("vpn off"),
+      (settings().privacy?.broadcast || "auto") === "rpc" ? c.soft("public tx") : c.ok("private tx"),
+      settings().privacy?.queryJitter ? c.ok("jitter on") : c.soft("jitter off"),
+    ].join(c.soft("  ·  ")),
+  ];
+  if (!PROXY) lines.push(c.warn("no tunnel — sends are blocked"));
+  if (!mainEvm()) lines.push(c.warn("no MAIN wallet — run the setup"));
+  return lines;
+}
+
 async function simpleMenu() {
   let snap = null;
   let lastActive = Date.now();
@@ -3271,23 +3383,18 @@ async function simpleMenu() {
       snap = await spin("Reading balances…", dashboardSnapshot).catch(() => null)
           || { k: netKey(), evm: null, btc: null, prices: null, at: Date.now() };
     }
-    banner();
-    renderDashboard(snap);
-    footer();
     const noMain = !mainEvm();
     const choices = [
       ...(noMain ? [{ title: "Set up MAIN + receiving addresses", value: "setup",
         description: "Guided: MAIN seed (paper) + receiving addresses." }] : []),
       { title: "Receive — new addresses", value: "addr",
         description: "One address per payer; everything forwards to MAIN." },
-      { title: "Verify an address", value: "verify",
-        description: "Checksum, known-wallet match and look-alike (poison) check." },
       { title: "Send", value: "send",
         description: "From a vault wallet to any address." },
-      { title: "Forward everything to MAIN", value: "sweep",
-        description: "Immediate sweep of receiving addresses (EVM + BTC)." },
-      { title: "Auto-forward (daemon)", value: "auto",
-        description: "Automatic forwarding at randomized intervals." },
+      { title: "Verify an address", value: "verify",
+        description: "Checksum, known-wallet match and look-alike (poison) check." },
+      { title: "Forward to MAIN", value: "forward",
+        description: "Sweep now, or run the auto-forward daemon." },
       { title: "Swap / convert", value: "swap",
         description: "Uniswap V2 — Ethereum mainnet." },
       { title: "Private hop", value: "hop",
@@ -3300,12 +3407,10 @@ async function simpleMenu() {
       ...(XW().length ? [{ title: "Monero", value: "xmr", description: "XMR balances (engine required)." }] : []),
       { title: "Privacy", value: "priv",
         description: "Tunnel, private broadcast, reused addresses." },
-      { title: "Harden privacy profile", value: "harden",
-        description: "One pass: proxy, jitter, rotation, private tx, clearnet off." },
       { title: "Settings", value: "set",
         description: "Network, privacy, wallet and security." },
       { title: "Security & backups", value: "sec",
-        description: "Seeds, export, backup, password, wipe." },
+        description: "Seeds, export, backup, recover, password, wipe." },
       { title: "Advanced mode", value: "adv",
         description: "All commands: tokens, split, offline signing, XMR…" },
       { title: "Vault", value: "vault",
@@ -3313,7 +3418,8 @@ async function simpleMenu() {
       { title: "Refresh", value: "refresh", description: "Read balances again." },
       { title: "Quit", value: "quit", description: "Everything is encrypted on disk." },
     ];
-    const { a } = await P({ type: "select", name: "a", message: "What do you want to do?", choices });
+    const { a } = await P({ type: "select", name: "a", message: "What do you want to do?",
+      header: homeHeader(snap), choices });
     lastActive = Date.now();
     try {
       if (a === "quit") { console.clear(); console.log("Bye."); process.exit(0); }
@@ -3328,10 +3434,17 @@ async function simpleMenu() {
       }
       else if (a === "send") await cmdSend([]);
       else if (a === "verify") await cmdVerify([]);
-      else if (a === "sweep") await cmdSweep([]);
-      else if (a === "auto") {
-        const { m } = await P({ type: "number", name: "m", message: "Interval in minutes (randomized)?", initial: 15, min: 1, max: 720 });
-        await cmdAuto([String(m)]);
+      else if (a === "forward") {
+        const { f } = await P({ type: "select", name: "f", message: "Forward to MAIN:", choices: [
+          { title: "Sweep now", value: "now", description: "Immediate sweep of every receiving address." },
+          { title: "Auto-forward daemon", value: "auto", description: "Run until Ctrl+C with randomized intervals." },
+          { title: "Back", value: "back" },
+        ]});
+        if (f === "now") await cmdSweep([]);
+        else if (f === "auto") {
+          const { m } = await P({ type: "number", name: "m", message: "Interval in minutes (randomized)?", initial: 15, min: 1, max: 720 });
+          await cmdAuto([String(m)]);
+        }
       }
       else if (a === "swap") await cmdSwap([]);
       else if (a === "hop") await cmdHop([]);
@@ -3340,7 +3453,6 @@ async function simpleMenu() {
       else if (a === "btc") await cmdBtc(["list"]);
       else if (a === "xmr") await cmdXmr(["list"]);
       else if (a === "priv") await cmdPrivacy();
-      else if (a === "harden") await cmdHarden();
       else if (a === "set") await quickSettings();
       else if (a === "sec") await securityMenu();
       else if (a === "vault") await vaultMode();
@@ -3349,7 +3461,6 @@ async function simpleMenu() {
     snap = null;
     await P({ type: "text", name: "_", message: c.dim("— Enter —") });
     lastActive = Date.now();
-    console.clear();
   }
 }
 
@@ -3861,22 +3972,21 @@ async function walletSettings() {
 }
 
 async function quickSettings() {
-  clearStep();
   while (true) {
-    banner();
-    const { a } = await P({ type: "select", name: "a", message: "Settings:", choices: [
-      { title: "Network & proxy", value: "net", description: "Proxy, Tor, VPN, RPC, BTC API, XMR daemon." },
-      { title: "Privacy", value: "priv", description: "Harden, broadcast, clearnet, jitter, prices." },
-      { title: "Wallet & display", value: "wallet", description: "Auto-lock, Bitcoin network, overview." },
-      { title: "Security & backups", value: "sec", description: "Seeds, keys, backup, recover, password, wipe." },
-      { title: "Back to main menu", value: "back" },
-    ]});
+    const { a } = await P({ type: "select", name: "a", message: "Settings:",
+      header: [`${V().active}  ·  ${N().label}`, "Network, privacy, wallet, security"],
+      choices: [
+        { title: "Network & proxy", value: "net", description: "Proxy, Tor, VPN, RPC, BTC API, XMR daemon." },
+        { title: "Privacy", value: "priv", description: "Harden, broadcast, clearnet, jitter, prices." },
+        { title: "Wallet & display", value: "wallet", description: "Auto-lock, Bitcoin network, overview." },
+        { title: "Security & backups", value: "sec", description: "Seeds, keys, backup, recover, password, wipe." },
+        { title: "Back to main menu", value: "back" },
+      ]});
     if (a === "back") return;
     if (a === "net") await networkSettings();
     if (a === "priv") await privacySettings();
     if (a === "wallet") await walletSettings();
     if (a === "sec") await securityMenu();
-    clearStep();
   }
 }
 
@@ -4515,7 +4625,6 @@ async function runAction(a) {
   } catch (e) { console.log(c.err(`\n✗ ${e.message}`)); }
 }
 async function advancedMenu(fromHome = false) {
-  banner();
   let lastActive = Date.now();
   const CAT_DESC = {
     "Insight & data": "Balances, statistics, history and exports — read-only views of everything you own.",
@@ -4591,23 +4700,23 @@ async function advancedMenu(fromHome = false) {
   };
   while (true) {
     if (settings().autolockMin > 0 && Date.now() - lastActive > settings().autolockMin * 60000) await lockSession();
-    statusLine();
-    footer();
     const { cat } = await P({
-      type: "select", name: "cat", message: "Main menu:",
+      type: "select", name: "cat", message: "Advanced mode",
+      header: [`${V().active}  ·  ${N().label}`],
       choices: [...Object.keys(MENU).map(t => ({ title: t, value: t, description: CAT_DESC[t] })),
                 fromHome
                   ? { title: "Back to main menu", value: "__home", description: "Return to the dashboard." }
                   : { title: "Quit", value: "__quit", description: "Clear the screen and exit." }],
     });
     lastActive = Date.now();
-    if (cat === "__home") { console.clear(); return; }
+    if (cat === "__home") return;
     if (cat === "__quit") { console.clear(); console.log("Bye."); process.exit(0); }
     while (true) {
       const { a } = await P({
-        type: "select", name: "a", message: `${cat}  →`,
+        type: "select", name: "a", message: cat,
+        header: [`${V().active}  ·  ${N().label}`],
         choices: [...MENU[cat].map(x => ({ title: MENU_TITLES[x] || x, value: x, description: SUB_DESC[x] || BTC_DESC[x] })),
-                  { title: "←  Back", value: "__back", description: "Return to the category menu." }],
+                  { title: "Back", value: "__back", description: "Return to the category menu." }],
       });
       lastActive = Date.now();
       if (a === "__back") break;
@@ -4615,10 +4724,6 @@ async function advancedMenu(fromHome = false) {
       if (!state.payload) ensureVault();
       await P({ type: "text", name: "_", message: c.dim("— Enter to continue —") });
       lastActive = Date.now();
-      console.clear();
-      console.log(MARGIN + c.bold("RAVENNE") + c.soft(`   ·   ${cat}`));
-      console.log(MARGIN + hrule(40));
-      console.log("");
     }
   }
 }
