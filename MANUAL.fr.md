@@ -1,6 +1,6 @@
 # Ravenne Wallet — Manuel d'utilisation (français)
 
-Version 9.9.1 · Windows · Node.js 18+ · licence MIT
+Version 9.10.0 · Windows · Node.js 18+ · licence MIT
 
 Ravenne est un wallet crypto **100 % local, 100 % terminal**. Aucun compte,
 aucun serveur, aucune télémétrie, **aucune activation**. Toutes les clés
@@ -239,7 +239,8 @@ check
 
 Tout est aussi accessible **dans le logiciel** : menu principal → Settings
 (proxy, Tor, requireProxy, broadcast, clearnet, BTC API, daemon XMR, RPC
-personnalisé, VPN, jitter, rotation, auto-lock). Aucune commande à taper.
+personnalisé, VPN, jitter, rotation, auto-lock, **animation de lancement**,
+**thème clair/sombre** détecté via le fond du terminal). Aucune commande à taper.
 
 ```
 settings                    afficher
@@ -452,7 +453,7 @@ exclusions.
 ## 12. Tests, build, licence
 
 ```powershell
-npm test       # node:test — 15 tests
+npm test       # node:test — 17 tests
 .\build.bat    # exe + zip
 ```
 

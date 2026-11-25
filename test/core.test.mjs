@@ -13,7 +13,7 @@ import {
   btcAddressFromPhrase, btcChangeFromPhrase, buildBtcTx, mergeChainTx,
 } from "../ravenne.js";
 
-const { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, liveUtxos, atomicWriteFile, readJsonResilient } = _internals;
+const { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, liveUtxos, atomicWriteFile, readJsonResilient, isLightRgb, menuLayout } = _internals;
 
 const tmp = () => path.join(os.tmpdir(), `ravenne-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
 
@@ -180,6 +180,26 @@ test("BTC coin control filters frozen UTXOs", () => {
   assert.equal(live.length, 1);
   assert.equal(live[0].txid, "bb");
   assert.equal(liveUtxos({}, list).length, 2);
+});
+
+test("menu layout fits any terminal size", () => {
+  const choices = Array.from({ length: 20 }, (_, i) => ({ title: `Item ${i}`, description: "description" }));
+  const strip = s => s.replace(/\x1b\[[0-9;]*m/g, "");
+  for (const [cols, rows] of [[120, 40], [80, 30], [60, 24], [44, 20], [40, 14]]) {
+    const lay = menuLayout({ message: "What do you want to do?", choices, header: ["wallet · chain", "main 0 ETH"], idx: 12, cols, rows });
+    const width = Math.min(76, cols - 4) + 2;
+    for (const line of lay.lines) assert.equal(strip(line).length, width, `width at ${cols}x${rows}`);
+    assert.ok(lay.lines.length + 2 <= rows, `height at ${cols}x${rows}`);
+    assert.ok(lay.left >= 0 && lay.top >= 0);
+    assert.ok(lay.visible >= 1 && lay.visible <= choices.length);
+  }
+});
+
+test("terminal background luminance picks light/dark", () => {
+  assert.equal(isLightRgb(255, 255, 255), true);
+  assert.equal(isLightRgb(0, 0, 0), false);
+  assert.equal(isLightRgb(20, 20, 20), false);
+  assert.equal(isLightRgb(240, 240, 240), true);
 });
 
 test("TOTP base32 round-trip and stable codes", () => {

@@ -7,8 +7,9 @@ Monero — no account, no server, no telemetry, no activation.
 > Open source (MIT). No webhook, no phone-home, no analytics. Everything runs
 > on your machine, encrypted with your master password.
 >
-> Clean terminal UI: a **centered menu** that follows the window, a balance
-> dashboard, English only, monochrome with green/yellow status colors.
+> Clean terminal UI: a **centered menu** with icons, a **boot animation**,
+> automatic **light/dark theme detection** (works over a Windows Terminal
+> background image), English only, monochrome with green/yellow status colors.
 
 **[Full manual — English](MANUAL.en.md)** · **[Manuel complet — français](MANUAL.fr.md)**
 

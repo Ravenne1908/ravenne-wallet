@@ -27,7 +27,7 @@ import { HDKey } from "@scure/bip32";
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
-const VERSION = "9.9.1";
+const VERSION = "9.10.0";
 process.title = "Ravenne Wallet";
 
 /* Network-layer privacy: route ALL outgoing HTTP (RPC, explorers, prices)
@@ -69,6 +69,71 @@ async function setupProxy() {
   }
   if (cfg?.requireProxy && state.flags?.noProxy)
     console.log(c.warn("! --no-proxy: traffic will leave this machine directly (IP exposed)."));
+}
+
+/* Ask the terminal for its background color (OSC 11) and adapt the palette.
+   Works over a Windows Terminal background image: we never paint a background,
+   we only choose readable foreground colors. */
+async function detectTheme() {
+  const forced = String(state.flags?.theme || process.env.RAVENNE_THEME || netConfig()?.theme || "").toLowerCase();
+  if (forced === "light") { UI_LIGHT = true; return; }
+  if (forced === "dark") { UI_LIGHT = false; return; }
+  if (!TTY || !process.stdin.isTTY) return;
+  const stdin = process.stdin, stdout = process.stdout;
+  await new Promise(resolve => {
+    let buf = "", done = false, timer = null;
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      stdin.removeListener("data", onData);
+      try { stdin.setRawMode(false); } catch {}
+      if (val != null) UI_LIGHT = val;
+      resolve();
+    };
+    const onData = (d) => {
+      buf += d.toString();
+      const m = buf.match(/\x1b\]11;rgb:([0-9a-f]{2,4})\/([0-9a-f]{2,4})\/([0-9a-f]{2,4})/i);
+      if (!m) return;
+      const part = h => parseInt(h.length > 2 ? h.slice(0, 2) : h, 16);
+      const [r, g, b] = m.slice(1, 4).map(part);
+      finish(isLightRgb(r, g, b));
+    };
+    timer = setTimeout(() => finish(null), 220);
+    try { stdin.setRawMode(true); } catch { return finish(null); }
+    stdin.resume();
+    stdin.on("data", onData);
+    stdout.write("\x1b]11;?\x07");
+  });
+}
+
+async function bootAnimation() {
+  if (!TTY || !process.stdin.isTTY || state.autoYes) return;
+  if (process.env.RAVENNE_NO_ANIM === "1") return;
+  if (settings().animations === false) return;
+  const out = process.stdout;
+  out.write("\x1b[2J\x1b[H");
+  const pad = "  ";
+  const title = "RAVENNE";
+  for (let i = 1; i <= title.length; i++) {
+    out.write("\r" + pad + c.bold(title.slice(0, i)) + " ".repeat(title.length - i));
+    await sleep(28);
+  }
+  out.write("\n" + pad + c.soft(`v${VERSION}  ·  local-first crypto wallet`) + "\n\n");
+  await sleep(90);
+  const rows = [
+    ["vault", "unlocked"],
+    ["wallet", V().active],
+    ["chain", N().label],
+    ["terminal", process.env.WT_SESSION ? "Windows Terminal" : (process.env.TERM_PROGRAM || "console")],
+    ["background", UI_LIGHT ? "light" : "dark"],
+    ["tunnel", PROXY ? "proxy on" : "none — sends blocked"],
+  ];
+  for (const [k, v] of rows) {
+    out.write("\r" + pad + c.soft(k.padEnd(11)) + "  " + v + "\n");
+    await sleep(70);
+  }
+  await sleep(140);
 }
 /* When compiled to an .exe (pkg), files must live NEXT TO the exe (snapshot FS is read-only).
    In a CJS bundle, import.meta.url is unavailable — fall back to argv[1]. */
@@ -136,18 +201,22 @@ const ERC20_ABI = [
 
 /* ─────────── Colors & basic helpers ─────────── */
 const TTY = process.stdout.isTTY;
-/* Monochrome UI: default text + green (ok) / yellow (warn, err). */
+/* Monochrome UI: default text + green (ok) / yellow (warn, err).
+   UI_LIGHT is set by detectTheme() so the same palette works over a light
+   Windows Terminal background image. */
+let UI_LIGHT = false;
+const isLightRgb = (r, g, b) => (0.299 * r + 0.587 * g + 0.114 * b) > 140;
 const c = {
-  ok:  s => TTY ? `\x1b[32m${s}\x1b[0m` : s,
-  warn:s => TTY ? `\x1b[33m${s}\x1b[0m` : s,
-  err: s => TTY ? `\x1b[1;33m${s}\x1b[0m` : s,
-  dim: s => TTY ? `\x1b[90m${s}\x1b[0m` : s,
+  ok:  s => TTY ? `${UI_LIGHT ? "\x1b[38;5;28m" : "\x1b[32m"}${s}\x1b[0m` : s,
+  warn:s => TTY ? `${UI_LIGHT ? "\x1b[38;5;130m" : "\x1b[33m"}${s}\x1b[0m` : s,
+  err: s => TTY ? `${UI_LIGHT ? "\x1b[1;38;5;130m" : "\x1b[1;33m"}${s}\x1b[0m` : s,
+  dim: s => TTY ? `${UI_LIGHT ? "\x1b[38;5;240m" : "\x1b[90m"}${s}\x1b[0m` : s,
   bold:s => TTY ? `\x1b[1m${s}\x1b[0m` : s,
   vio: s => TTY ? `\x1b[1m${s}\x1b[0m` : s,
   cyan:s => s,
   wht: s => TTY ? `\x1b[1m${s}\x1b[0m` : s,
   accent: s => TTY ? `\x1b[1m${s}\x1b[0m` : s,
-  soft:   s => TTY ? `\x1b[90m${s}\x1b[0m` : s,
+  soft:   s => TTY ? `${UI_LIGHT ? "\x1b[38;5;240m" : "\x1b[90m"}${s}\x1b[0m` : s,
   blue:   s => s,
   inv:    s => TTY ? `\x1b[7m${s}\x1b[0m` : s,
 };
@@ -178,6 +247,7 @@ const DEFAULT_SETTINGS = {
   prices: false,                    // privacy: no price API calls unless enabled
   vpnCheck: true,                   // refuse to connect without an active VPN
   vpnFailClosed: true,              // if the check cannot run, BLOCK (privacy default)
+  animations: true,                 // boot animation (TTY only)
   autolockMin: 5, rpc: {}, tokens: {}, book: [], explorers: {}, btcTest: false,
   privacy: {
     retainPermille: 3,              // EVM sweeps keep a random 0–0.3% behind
@@ -437,6 +507,37 @@ if (TTY && process.stdin.isTTY) readline.emitKeypressEvents(process.stdin);
 
 /* Centered, scrollable menu drawn by Ravenne itself (not clack).
    Returns the selected value, or null on Esc. */
+function menuLayout({ message, choices, header = [], idx = 0, scroll = 0, cols = 80, rows = 30 }) {
+  const I = Math.min(76, cols - 4);
+  const tw = I - 2;
+  const title = fit(message || "", I - 6);
+  const overhead = 7 + (header.length ? header.length + 1 : 0);
+  const maxItems = Math.max(3, rows - overhead - 2);
+  const visible = Math.min(choices.length, maxItems);
+  if (idx < scroll) scroll = idx;
+  if (idx >= scroll + visible) scroll = idx - visible + 1;
+  const above = scroll > 0, below = scroll + visible < choices.length;
+  const pad = (s, w) => s + " ".repeat(Math.max(0, w - stripA(s).length));
+  const L = [];
+  L.push(c.soft("┌─ ") + c.bold(title) + " " +
+    c.soft("─".repeat(Math.max(0, I - stripA(title).length - 3))) + c.soft("┐"));
+  for (const h of header) L.push(c.soft("│") + " " + pad(fit(h, tw), tw) + " " + c.soft("│"));
+  if (header.length) L.push(c.soft("│") + " " + c.soft("─".repeat(tw)) + " " + c.soft("│"));
+  if (above) L.push(c.soft("│") + " " + c.soft(pad("  ↑ more", tw)) + " " + c.soft("│"));
+  for (let i = scroll; i < scroll + visible; i++) {
+    const label = fit(choices[i].title, tw - 4);
+    if (i === idx) L.push(c.soft("│") + " " + c.inv((" › " + label).padEnd(tw, " ")) + " " + c.soft("│"));
+    else L.push(c.soft("│") + " " + pad("   " + label, tw) + " " + c.soft("│"));
+  }
+  if (below) L.push(c.soft("│") + " " + c.soft(pad("  ↓ more", tw)) + " " + c.soft("│"));
+  L.push(c.soft("│") + " " + c.soft("─".repeat(tw)) + " " + c.soft("│"));
+  L.push(c.soft("│") + " " + c.soft(pad(fit(choices[idx]?.description || "", tw), tw)) + " " + c.soft("│"));
+  L.push(c.soft("└" + "─".repeat(I) + "┘"));
+  const top = Math.max(0, Math.floor((rows - (L.length + 2)) / 2));
+  const left = Math.max(0, Math.floor((cols - (I + 2)) / 2));
+  return { lines: L, top, left, visible, scroll };
+}
+
 function uiMenu({ message, choices, header = [], initial = 0 }) {
   return new Promise((resolve) => {
     const stdin = process.stdin, stdout = process.stdout;
@@ -474,36 +575,11 @@ function uiMenu({ message, choices, header = [], initial = 0 }) {
     };
 
     const render = () => {
-      const I = Math.min(76, cols() - 4);      // interior width
-      const tw = I - 2;                        // text width inside "│ "
-      const title = fit(message || "", I - 6);
-      const overhead = 7 + (header.length ? header.length + 1 : 0);
-      const maxItems = Math.max(3, rows() - overhead - 2);
-      visible = Math.min(choices.length, maxItems);
-      if (idx < scroll) scroll = idx;
-      if (idx >= scroll + visible) scroll = idx - visible + 1;
-      const above = scroll > 0, below = scroll + visible < choices.length;
-      const L = [];
-      L.push(c.soft("┌─ ") + c.bold(title) + " " +
-        c.soft("─".repeat(Math.max(0, I - stripA(title).length - 3))) + c.soft("┐"));
-      for (const h of header) L.push(c.soft("│") + " " + pad(fit(h, tw), tw) + " " + c.soft("│"));
-      if (header.length) L.push(c.soft("│") + " " + c.soft("─".repeat(tw)) + " " + c.soft("│"));
-      if (above) L.push(c.soft("│") + " " + c.soft(pad("  ↑ more", tw)) + " " + c.soft("│"));
-      for (let i = scroll; i < scroll + visible; i++) {
-        const label = fit(choices[i].title, tw - 4);
-        if (i === idx) L.push(c.soft("│") + " " + c.inv((" › " + label).padEnd(tw, " ")) + " " + c.soft("│"));
-        else L.push(c.soft("│") + " " + pad("   " + label, tw) + " " + c.soft("│"));
-      }
-      if (below) L.push(c.soft("│") + " " + c.soft(pad("  ↓ more", tw)) + " " + c.soft("│"));
-      L.push(c.soft("│") + " " + c.soft("─".repeat(tw)) + " " + c.soft("│"));
-      L.push(c.soft("│") + " " + c.soft(pad(fit(choices[idx]?.description || "", tw), tw)) + " " + c.soft("│"));
-      L.push(c.soft("└" + "─".repeat(I) + "┘"));
-
-      const top = Math.max(0, Math.floor((rows() - (L.length + 2)) / 2));
-      const left = Math.max(0, Math.floor((cols() - (I + 2)) / 2));
-      const ind = " ".repeat(left);
-      stdout.write("\x1b[2J\x1b[H" + "\n".repeat(top) +
-        L.map(l => ind + l).join("\n") + "\n" +
+      const lay = menuLayout({ message, choices, header, idx, scroll, cols: cols(), rows: rows() });
+      scroll = lay.scroll; visible = lay.visible;
+      const ind = " ".repeat(lay.left);
+      stdout.write("\x1b[2J\x1b[H" + "\n".repeat(lay.top) +
+        lay.lines.map(l => ind + l).join("\n") + "\n" +
         ind + c.soft("↑↓ move   ·   enter select   ·   esc back / cancel") + "\n");
     };
 
@@ -932,9 +1008,9 @@ async function pickProfile() {
     const names = Object.keys(V().profiles);
     const { a } = await P({ type: "select", name: "a", message: "Which wallet do you want to open?",
       choices: [
-        ...names.map(n => ({ title: `${V().active === n ? "> " : "  "}${n}`, value: n, description: profileSummary(n) })),
+        ...names.map(n => ({ title: `${V().active === n ? "✓ " : "  "}${n}`, value: n, description: profileSummary(n) })),
         { title: "+  New wallet", value: "__new", description: "Create an empty wallet and run its setup." },
-        { title: "Manage (list / rename / delete)", value: "__manage", description: "See all wallets, rename or delete one." },
+        { title: "*  Manage (list / rename / delete)", value: "__manage", description: "See all wallets, rename or delete one." },
       ] });
     if (a === "__new") {
       const { n } = await P({ type: "text", name: "n", message: "Name of the new wallet:" });
@@ -989,6 +1065,7 @@ function ensureVault() {
   s.rpc ??= {}; s.tokens ??= {}; s.book ??= []; s.explorers ??= {}; s.btcTest ??= false;
   s.privacy = { ...DEFAULT_SETTINGS.privacy, ...(s.privacy || {}) };
   s.seeds ??= {}; s.prices ??= false; s.vpnCheck ??= true; s.vpnFailClosed ??= true;
+  s.animations ??= true;
   s.btcApi ??= null;
   s.xmrRpc ??= null; s.xmrRpcAuth ??= null; s.xmrDaemon ??= null; s.xmrStage ??= false; s.xmrFiles ??= {};
   /* migration: vaults from v6.3 and earlier held ONE set of wallets directly */
@@ -3383,38 +3460,38 @@ async function simpleMenu() {
     }
     const noMain = !mainEvm();
     const choices = [
-      ...(noMain ? [{ title: "Set up MAIN + receiving addresses", value: "setup",
+      ...(noMain ? [{ title: "+  Set up MAIN + receiving addresses", value: "setup",
         description: "Guided: MAIN seed (paper) + receiving addresses." }] : []),
-      { title: "Receive — new addresses", value: "addr",
+      { title: "↓  Receive — new addresses", value: "addr",
         description: "One address per payer; everything forwards to MAIN." },
-      { title: "Send", value: "send",
+      { title: "↑  Send", value: "send",
         description: "From a vault wallet to any address." },
-      { title: "Verify an address", value: "verify",
+      { title: "✓  Verify an address", value: "verify",
         description: "Checksum, known-wallet match and look-alike (poison) check." },
-      { title: "Forward to MAIN", value: "forward",
+      { title: "»  Forward to MAIN", value: "forward",
         description: "Sweep now, or run the auto-forward daemon." },
-      { title: "Swap / convert", value: "swap",
+      { title: "⇄  Swap / convert", value: "swap",
         description: "Uniswap V2 — Ethereum mainnet." },
-      { title: "Private hop", value: "hop",
+      { title: "~  Private hop", value: "hop",
         description: "EVM: move funds through a fresh wallet, wait, then to MAIN." },
-      { title: "Wallets & balances", value: "wallets",
+      { title: "▤  Wallets & balances", value: "wallets",
         description: "Every wallet on the active chain." },
-      { title: "History", value: "hist",
+      { title: "≡  History", value: "hist",
         description: "Sent + synced transactions." },
-      ...(BW().length ? [{ title: "Bitcoin", value: "btc", description: "BTC balances and addresses." }] : []),
-      ...(XW().length ? [{ title: "Monero", value: "xmr", description: "XMR balances (engine required)." }] : []),
-      { title: "Privacy", value: "priv",
+      ...(BW().length ? [{ title: "₿  Bitcoin", value: "btc", description: "BTC balances and addresses." }] : []),
+      ...(XW().length ? [{ title: "◎  Monero", value: "xmr", description: "XMR balances (engine required)." }] : []),
+      { title: "◈  Privacy", value: "priv",
         description: "Tunnel, private broadcast, reused addresses." },
-      { title: "Settings", value: "set",
+      { title: "*  Settings", value: "set",
         description: "Network, privacy, wallet and security." },
-      { title: "Security & backups", value: "sec",
+      { title: "#  Security & backups", value: "sec",
         description: "Seeds, export, backup, recover, password, wipe." },
-      { title: "Advanced mode", value: "adv",
+      { title: "@  Advanced mode", value: "adv",
         description: "All commands: tokens, split, offline signing, XMR…" },
-      { title: "Vault", value: "vault",
+      { title: "▣  Vault", value: "vault",
         description: "Long-term wallets, separate file and password." },
-      { title: "Refresh", value: "refresh", description: "Read balances again." },
-      { title: "Quit", value: "quit", description: "Everything is encrypted on disk." },
+      { title: "R  Refresh", value: "refresh", description: "Read balances again." },
+      { title: "x  Quit", value: "quit", description: "Everything is encrypted on disk." },
     ];
     const { a } = await P({ type: "select", name: "a", message: "What do you want to do?",
       header: homeHeader(snap), choices });
@@ -3472,31 +3549,31 @@ async function securityMenu() {
     const { a } = await P({
       type: "select", name: "a", message: "Backup & security:",
       choices: [
-        { title: "Backup the vault to a file", value: "backup",
+        { title: "+  Backup the vault to a file", value: "backup",
           description: "Encrypted copy of the whole vault — store it on a USB stick or cloud drive." },
-        { title: "Restore the vault from a backup", value: "restore",
+        { title: "<  Restore the vault from a backup", value: "restore",
           description: "Replace the current vault with a backup file (same master password only)." },
-        { title: "Recover from .bak (corrupted vault)", value: "recover",
+        { title: "!  Recover from .bak (corrupted vault)", value: "recover",
           description: "If the main vault is unreadable, restore the automatic .bak copy." },
-        { title: "Reveal the RECEIVING seed (hot, inside vault)", value: "rseed",
+        { title: "*  Reveal the RECEIVING seed (hot, inside vault)", value: "rseed",
           description: "The seed controlling all receiving wallets — for paper backup." },
-        { title: "Reveal the MAIN seed (only if stored in vault)", value: "mseed",
+        { title: "*  Reveal the MAIN seed (only if stored in vault)", value: "mseed",
           description: "Shown once at setup if watch-only — normally only on your paper." },
-        { title: "Export main keystore (only if key stored)", value: "ks",
+        { title: "$  Export main keystore (only if key stored)", value: "ks",
           description: "Encrypted keystore file importable in MetaMask and elsewhere." },
-        { title: "Export a raw private key", value: "rawkey",
+        { title: "$  Export a raw private key", value: "rawkey",
           description: "Reveal one wallet's private key — full access, handle with extreme care." },
-        { title: "Change master password", value: "pass",
+        { title: "#  Change master password", value: "pass",
           description: "Re-encrypts gate and vault with a new password." },
-        { title: "2FA (TOTP)", value: "2fa",
+        { title: "✓  2FA (TOTP)", value: "2fa",
           description: "Require a rotating code from an authenticator app at unlock." },
-        { title: "Duress vault (decoy)", value: "duress",
+        { title: "?  Duress vault (decoy)", value: "duress",
           description: "A second password opens a plausible empty vault." },
-        { title: "Secure wipe", value: "wipe",
+        { title: "x  Secure wipe", value: "wipe",
           description: "3-pass overwrite + delete (requires typing ERASE)." },
-        { title: "Privacy notes — what this protects against", value: "priv",
+        { title: "◈  Privacy notes — what this protects against", value: "priv",
           description: "Honest summary of the privacy model and its limits." },
-        { title: "Back", value: "back" },
+        { title: "<  Back", value: "back" },
       ],
     });
     if (a === "back") return;
@@ -3800,27 +3877,27 @@ async function networkSettings() {
   while (true) {
     const s = settings();
     const { a } = await P({ type: "select", name: "a", message: "Network & proxy:", choices: [
-      { title: `Proxy: ${PROXY || "none"}`, value: "proxyurl",
+      { title: `~  Proxy: ${PROXY || "none"}`, value: "proxyurl",
         description: "HTTP proxy for ALL traffic (Tor/Privoxy/VPN box)." },
-      { title: "Test proxy connection", value: "proxytest",
+      { title: "✓  Test proxy connection", value: "proxytest",
         description: "Send one request through the configured proxy." },
-      { title: "Auto-detect local Tor/Privoxy", value: "tor",
+      { title: "*  Auto-detect local Tor/Privoxy", value: "tor",
         description: "Probe 8118/9050/9150 and enable the HTTP proxy if found." },
-      { title: `Require proxy at startup: ${netConfig()?.requireProxy ? "ON" : "OFF"}`, value: "reqproxy",
+      { title: `!  Require proxy at startup: ${netConfig()?.requireProxy ? "ON" : "OFF"}`, value: "reqproxy",
         description: "Refuse to start without a proxy. Fail closed." },
-      { title: `VPN check: ${s.vpnCheck ? "ON" : "OFF"}`, value: "vpn",
+      { title: `#  VPN check: ${s.vpnCheck ? "ON" : "OFF"}`, value: "vpn",
         description: "Refuse to connect without an anonymity VPN." },
-      { title: `VPN fail-closed: ${s.vpnFailClosed !== false ? "ON" : "OFF"}`, value: "failclosed",
+      { title: `!  VPN fail-closed: ${s.vpnFailClosed !== false ? "ON" : "OFF"}`, value: "failclosed",
         description: "Block when adapters cannot be inspected." },
-      { title: `Mesh VPN accepted: ${s.meshVpnOk ? "YES" : "NO"}`, value: "mesh",
+      { title: `+  Mesh VPN accepted: ${s.meshVpnOk ? "YES" : "NO"}`, value: "mesh",
         description: "Radmin/Hamachi/ZeroTier do NOT hide your traffic." },
-      { title: `Custom RPC: ${Object.keys(s.rpc).length} chain(s)`, value: "rpc",
+      { title: `@  Custom RPC: ${Object.keys(s.rpc).length} chain(s)`, value: "rpc",
         description: "Point a chain at your own node." },
-      { title: `BTC API: ${s.btcApi ? "custom" : "Blockstream public"}`, value: "btcapi",
+      { title: `₿  BTC API: ${s.btcApi ? "custom" : "Blockstream public"}`, value: "btcapi",
         description: "Your own Esplora/mempool." },
-      { title: `Monero daemon: ${s.xmrDaemon || "default (clearnet)"}`, value: "xmrnode",
+      { title: `◎  Monero daemon: ${s.xmrDaemon || "default (clearnet)"}`, value: "xmrnode",
         description: "Your own monerod." },
-      { title: "Back", value: "back" },
+      { title: "<  Back", value: "back" },
     ]});
     if (a === "back") return;
     try {
@@ -3891,23 +3968,23 @@ async function privacySettings() {
   while (true) {
     const s = settings();
     const { a } = await P({ type: "select", name: "a", message: "Privacy:", choices: [
-      { title: "Harden privacy profile", value: "harden", description: "Apply the full profile in one pass." },
-      { title: `Broadcast: ${(s.privacy?.broadcast || "auto") === "rpc" ? "public RPC" : "private (ETH)"}`, value: "bcast",
+      { title: "!  Harden privacy profile", value: "harden", description: "Apply the full profile in one pass." },
+      { title: `»  Broadcast: ${(s.privacy?.broadcast || "auto") === "rpc" ? "public RPC" : "private (ETH)"}`, value: "bcast",
         description: "Private relays vs public mempool." },
-      { title: `Clearnet sends: ${s.privacy?.allowClearnetSend ? "ALLOWED" : "blocked"}`, value: "clearnet",
+      { title: `!  Clearnet sends: ${s.privacy?.allowClearnetSend ? "ALLOWED" : "blocked"}`, value: "clearnet",
         description: "Blocked = no send without a tunnel." },
-      { title: `Query jitter: ${s.privacy?.queryJitter ? "ON" : "OFF"}`, value: "jit",
+      { title: `~  Query jitter: ${s.privacy?.queryJitter ? "ON" : "OFF"}`, value: "jit",
         description: "Random delays between lookups." },
-      { title: `RPC rotation: ${s.privacy?.rpcRotation !== false ? "ON" : "OFF"}`, value: "rot",
+      { title: `R  RPC rotation: ${s.privacy?.rpcRotation !== false ? "ON" : "OFF"}`, value: "rot",
         description: "Random endpoint per query." },
-      { title: `Price lookups: ${s.prices ? "ON" : "OFF"}`, value: "prices",
+      { title: `$  Price lookups: ${s.prices ? "ON" : "OFF"}`, value: "prices",
         description: "CoinGecko sees your IP when ON." },
-      { title: `Sweep threshold: ${s.privacy.sweepFeeMult ?? 3}× fee`, value: "sweepfee",
+      { title: `⇩  Sweep threshold: ${s.privacy.sweepFeeMult ?? 3}× fee`, value: "sweepfee",
         description: "Forward when balance > fee × N." },
-      { title: `Convert on forward: ${s.convert?.eth ? `${s.convert.eth.from} → ${s.convert.eth.to}` : "off"}`, value: "convert",
+      { title: `⇄  Convert on forward: ${s.convert?.eth ? `${s.convert.eth.from} → ${s.convert.eth.to}` : "off"}`, value: "convert",
         description: "Swap before funds reach MAIN (Ethereum)." },
-      { title: "Open traceability dashboard", value: "dashboard", description: "What links you, layer by layer." },
-      { title: "Back", value: "back" },
+      { title: "◈  Open traceability dashboard", value: "dashboard", description: "What links you, layer by layer." },
+      { title: "<  Back", value: "back" },
     ]});
     if (a === "back") return;
     try {
@@ -3951,10 +4028,12 @@ async function walletSettings() {
   while (true) {
     const s = settings();
     const { a } = await P({ type: "select", name: "a", message: "Wallet & display:", choices: [
-      { title: `Auto-lock: ${s.autolockMin} min`, value: "lock", description: "0 = never." },
-      { title: `Bitcoin network: ${s.btcTest ? "testnet" : "mainnet"}`, value: "btcnet", description: "Switch BTC mainnet/testnet." },
-      { title: "Show overview", value: "overview", description: "Print the balance dashboard now." },
-      { title: "Back", value: "back" },
+      { title: `#  Auto-lock: ${s.autolockMin} min`, value: "lock", description: "0 = never." },
+      { title: `*  Launch animation: ${s.animations === false ? "OFF" : "ON"}`, value: "anim", description: "Short boot animation (TTY only)." },
+      { title: `◐  Theme: ${UI_LIGHT ? "light" : "dark"} (auto-detected)`, value: "theme", description: "Adapt colors to the terminal background." },
+      { title: `₿  Bitcoin network: ${s.btcTest ? "testnet" : "mainnet"}`, value: "btcnet", description: "Switch BTC mainnet/testnet." },
+      { title: "▤  Show overview", value: "overview", description: "Print the balance dashboard now." },
+      { title: "<  Back", value: "back" },
     ]});
     if (a === "back") return;
     try {
@@ -3962,6 +4041,21 @@ async function walletSettings() {
         const { m } = await P({ type: "number", name: "m", initial: s.autolockMin, min: 0, max: 240,
           message: "Auto-lock minutes (0 = off):" });
         s.autolockMin = m; save(); console.log(c.ok(`✓ auto-lock ${m === 0 ? "off" : m + " min"}`));
+      }
+      if (a === "anim") { s.animations = s.animations === false; save();
+        console.log(c.ok(`✓ launch animation ${s.animations ? "on" : "off"}`)); }
+      if (a === "theme") {
+        const { v } = await P({ type: "select", name: "v", message: "Theme:", choices: [
+          { title: "Auto (detect background)", value: "auto" },
+          { title: "Dark background", value: "dark" },
+          { title: "Light background", value: "light" },
+        ]});
+        const cfg = netConfig() || {};
+        writeNetConfig({ ...cfg, theme: v === "auto" ? null : v });
+        if (v === "light") UI_LIGHT = true;
+        else if (v === "dark") UI_LIGHT = false;
+        else { state.flags.theme = null; await detectTheme(); }
+        console.log(c.ok(`✓ theme ${v === "auto" ? (UI_LIGHT ? "light (detected)" : "dark (detected)") : v}`));
       }
       if (a === "btcnet") { s.btcTest = !s.btcTest; save(); console.log(c.ok(`✓ Bitcoin ${s.btcTest ? "testnet" : "mainnet"}`)); }
       if (a === "overview") await cmdOverview();
@@ -3974,11 +4068,11 @@ async function quickSettings() {
     const { a } = await P({ type: "select", name: "a", message: "Settings:",
       header: [`${V().active}  ·  ${N().label}`, "Network, privacy, wallet, security"],
       choices: [
-        { title: "Network & proxy", value: "net", description: "Proxy, Tor, VPN, RPC, BTC API, XMR daemon." },
-        { title: "Privacy", value: "priv", description: "Harden, broadcast, clearnet, jitter, prices." },
-        { title: "Wallet & display", value: "wallet", description: "Auto-lock, Bitcoin network, overview." },
-        { title: "Security & backups", value: "sec", description: "Seeds, keys, backup, recover, password, wipe." },
-        { title: "Back to main menu", value: "back" },
+        { title: "~  Network & proxy", value: "net", description: "Proxy, Tor, VPN, RPC, BTC API, XMR daemon." },
+        { title: "◈  Privacy", value: "priv", description: "Harden, broadcast, clearnet, jitter, prices." },
+        { title: "▤  Wallet & display", value: "wallet", description: "Auto-lock, animation, theme, overview." },
+        { title: "#  Security & backups", value: "sec", description: "Seeds, keys, backup, recover, password, wipe." },
+        { title: "<  Back to main menu", value: "back" },
       ]});
     if (a === "back") return;
     if (a === "net") await networkSettings();
@@ -4696,12 +4790,16 @@ async function advancedMenu(fromHome = false) {
     "xmr-node": "Choose the remote daemon node that serves wallet requests.",
     "xmr-network": "Monero mainnet or stagenet (fake XMR for practice).",
   };
+  const CAT_ICON = {
+    "Insight & data": "≡", "Wallets": "▤", "Transfers": "⇄", "Bitcoin": "₿",
+    "Monero (XMR)": "◎", "USB & advanced": "▣", "Settings & security": "*", "Automation": "R",
+  };
   while (true) {
     if (settings().autolockMin > 0 && Date.now() - lastActive > settings().autolockMin * 60000) await lockSession();
     const { cat } = await P({
       type: "select", name: "cat", message: "Advanced mode",
       header: [`${V().active}  ·  ${N().label}`],
-      choices: [...Object.keys(MENU).map(t => ({ title: t, value: t, description: CAT_DESC[t] })),
+      choices: [...Object.keys(MENU).map(t => ({ title: `${CAT_ICON[t] || "»"}  ${t}`, value: t, description: CAT_DESC[t] })),
                 fromHome
                   ? { title: "Back to main menu", value: "__home", description: "Return to the dashboard." }
                   : { title: "Quit", value: "__quit", description: "Clear the screen and exit." }],
@@ -4855,7 +4953,7 @@ Security & privacy
 
 Flags: --yes · --all · --random · --delay <s> · --words 24 · --seed
        --token <SYM> · --file <path> · --keystore <file>
-       --broadcast private|rpc · --coincontrol
+       --broadcast private|rpc · --coincontrol · --theme light|dark
        --no-vpn · --no-proxy
 Scripting: RAVENNE_PASS=<password> (also RAVENNE_KEYPASS for keystores).
 
@@ -4893,7 +4991,7 @@ const ROUTES = {
 };
 
 function parseArgs(argv) {
-  const flags = { yes: false, all: false, random: false, delay: 0, words: 12, seed: false, token: null, file: null, keystore: null, keepKey: false, profile: null, noProxy: false, broadcast: null, coincontrol: false };
+  const flags = { yes: false, all: false, random: false, delay: 0, words: 12, seed: false, token: null, file: null, keystore: null, keepKey: false, profile: null, noProxy: false, broadcast: null, coincontrol: false, theme: null };
   const args = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -4903,6 +5001,11 @@ function parseArgs(argv) {
     else if (a === "--seed") flags.seed = true;
     else if (a === "--keep-key") flags.keepKey = true;
     else if (a === "--coincontrol") flags.coincontrol = true;
+    else if (a === "--theme") {
+      const v = String(argv[++i] || "").toLowerCase();
+      if (v === "light" || v === "dark") flags.theme = v;
+      else console.log(c.warn("--theme expects light|dark"));
+    }
     else if (a === "--delay") flags.delay = parseFloat(argv[++i]) || 0;
     else if (a === "--words") flags.words = parseInt(argv[++i], 10) === 24 ? 24 : 12;
     else if (a === "--token") flags.token = argv[++i];
@@ -4927,6 +5030,7 @@ async function main() {
   const { args, flags } = parseArgs(process.argv.slice(2));
   state.autoYes = flags.yes;
   state.flags = flags;
+  if (!["help", "-h", "--help"].includes(args[0])) await detectTheme();
   await setupProxy();
   if (!args.length) {
     await unlockGate();
@@ -4938,6 +5042,7 @@ async function main() {
       V().active = state.flags.profile;
     }
     await purgeExpired();
+    await bootAnimation();
     return simpleMenu();
   }
   if (args[0] === "menu") {
@@ -4965,7 +5070,7 @@ async function main() {
 }
 
 /* Test hooks (pure helpers only — no wallet state required). */
-export const _internals = { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, utxoKey, liveUtxos, atomicWriteFile, readJsonResilient };
+export const _internals = { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, utxoKey, liveUtxos, atomicWriteFile, readJsonResilient, isLightRgb, menuLayout };
 
 /* Direct execution — including bundled .cjs and pkg .exe forms. */
 const isMain = (() => {
