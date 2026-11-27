@@ -1,6 +1,6 @@
 # Ravenne Wallet — User Manual (English)
 
-Version 9.11.0 · Windows · Node.js 18+ · MIT license
+Version 9.11.1 · Windows · Node.js 18+ · MIT license
 
 Ravenne is a **100% local, 100% terminal** crypto wallet. No account, no
 server, no telemetry, **no activation**. All keys stay on your machine,
@@ -88,6 +88,15 @@ GhosttyFetch, MIT) sized to the window, with a progress bar. Any key skips it.
   to dark grays; force it with `--theme light` if detection is wrong.
 - The menu is centered, scrolls with `↑ n more / ↓ n more`, re-centers when
   the window is resized, and `esc` goes back.
+- Keyboard: `↑`/`↓`, `j`/`k`, `Ctrl+N`/`Ctrl+P`, `PgUp`/`PgDn`, `Home`/`End`,
+  `Tab`. `esc` goes back from a menu and cancels a text prompt (it no longer
+  quits the app).
+- Menus keep the terminal in raw mode between screens, so repeated
+  back-and-forth navigation never stops responding. Results that need reading
+  (seed, private key, backup path, dashboard) wait for Enter instead of being
+  erased by the next repaint.
+- Settings are fully interactive everywhere, including through
+  **Advanced mode → Settings & security** (RPC, ERC-20 tokens, address book).
 
 ---
 
@@ -471,7 +480,7 @@ exclusions.
 ## 12. Tests, build, license
 
 ```powershell
-npm test       # node:test — 22 tests
+npm test       # node:test - 24 tests
 .\build.bat    # exe + zip
 ```
 

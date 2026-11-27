@@ -116,7 +116,7 @@ Get-FileHash ravenne-wallet-vX.Y.Z.zip -Algorithm SHA256
 ## Tests
 
 ```powershell
-npm test          # 22 tests: crypto, wallets, BTC tx, menus, splash geometry
+npm test          # 24 tests: crypto, wallets, BTC tx, menus, splash geometry
 npm run ghost     # preview one splash frame in the terminal
 ```
 

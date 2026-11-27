@@ -17,7 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { argon2id } from "@noble/hashes/argon2";
-import { exec, execFileSync, spawn } from "node:child_process";
+import { exec, execFile, execFileSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import readline from "node:readline";
 import zlib from "node:zlib";
@@ -29,7 +29,7 @@ import { HDKey } from "@scure/bip32";
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
-const VERSION = "9.11.0";
+const VERSION = "9.11.1";
 process.title = "Ravenne Wallet";
 
 /* Network-layer privacy: route ALL outgoing HTTP (RPC, explorers, prices)
@@ -82,6 +82,7 @@ async function detectTheme() {
   if (forced === "dark") { UI_LIGHT = false; return; }
   if (!TTY || !process.stdin.isTTY) return;
   const stdin = process.stdin, stdout = process.stdout;
+  const wasRaw = !!stdin.isRaw;
   await new Promise(resolve => {
     let buf = "", done = false, timer = null;
     const finish = (val) => {
@@ -89,7 +90,7 @@ async function detectTheme() {
       done = true;
       if (timer) clearTimeout(timer);
       stdin.removeListener("data", onData);
-      try { stdin.setRawMode(false); } catch {}
+      if (!wasRaw) { try { stdin.setRawMode(false); } catch {} }
       if (val != null) UI_LIGHT = val;
       resolve();
     };
@@ -345,6 +346,7 @@ async function bootAnimation(force = false) {
   if (!data) return bootPlain();
 
   const out = process.stdout, stdin = process.stdin;
+  const wasRaw = !!stdin.isRaw;
   const mode = ["short", "normal", "full"].includes(state.flags?.anim) ? state.flags.anim
     : ["short", "normal", "full"].includes(s.animMode) ? s.animMode : "normal";
   const total = mode === "short" ? 45 : mode === "full" ? data.raw.length : 72;
@@ -403,7 +405,7 @@ async function bootAnimation(force = false) {
     await sleep(skipped ? 140 : 480);
   } finally {
     stdin.removeListener("keypress", onKey);
-    try { stdin.setRawMode(false); } catch {}
+    if (!wasRaw) { try { stdin.setRawMode(false); } catch {} }
     out.write("\x1b[2J\x1b[H\x1b[?25h");
   }
 }
@@ -536,7 +538,8 @@ const DEFAULT_SETTINGS = {
   btcApi: null,                     // own Esplora instance (traceability)
   xmrRpc: null, xmrRpcAuth: null, xmrDaemon: null, xmrStage: false, xmrFiles: {},
 };
-const state = { payload: null, pass: null, autoYes: false, flags: { delay: 0 } };
+const state = { payload: null, pass: null, autoYes: false, flags: { delay: 0 },
+  inMenu: false, kdfCache: new Map() };
 /* The vault holds several NAMED PROFILES; one is active per session.
    Each profile = its own EVM/BTC/XMR wallets, history and chain. */
 const V      = () => state.payload;                            // container
@@ -634,13 +637,25 @@ async function P(questions) {
     } else {
       v = await clack.text({ message: q.message, placeholder: q.placeholder, defaultValue: q.initial });
     }
-    if (clack.isCancel(v)) { clack.outro("Bye."); process.exit(0); }
+    if (clack.isCancel(v)) {
+      /* Inside a menu, Esc cancels the current prompt and goes back instead of
+         killing the whole app (it used to exit on any cancelled text field). */
+      if (state.inMenu) { out[q.name || "value"] = undefined; continue; }
+      clack.outro("Bye."); process.exit(0);
+    }
     out[q.name || "value"] = v;
   }
   return out;
 }
 const confirm = async msg =>
   state.autoYes ? true : (await P({ type: "confirm", name: "v", message: msg, initial: false })).v;
+
+/* Keep printed output (seed, private key, backup path, dashboard) on screen
+   until the user acknowledges it. Without this the next menu repaint clears
+   the screen and the result is lost. */
+async function hold(msg = "— Enter to continue —") {
+  await P({ type: "text", name: "_", message: c.dim(msg) });
+}
 
 /* ─────────── UI ─────────── */
 const MARGIN = "  ";
@@ -828,11 +843,57 @@ function menuLayout({ message, choices, header = [], idx = 0, scroll = 0, cols =
   return { lines: L, top, left, visible, scroll };
 }
 
+/* Decode a raw stdin chunk into menu actions. We parse the bytes ourselves
+   instead of relying on readline's keypress parser: a lone Esc immediately
+   followed by an arrow (Esc = back, then ↓) used to be swallowed as an
+   "Alt+arrow" prefix, which made the menu feel frozen. */
+function parseMenuKeys(s) {
+  const acts = [];
+  const seq = /^\x1b(?:\[([0-9;]*)([A-Za-z~])|O([A-Za-z]))/;
+  for (let i = 0; i < s.length;) {
+    const rest = s.slice(i);
+    if (rest[0] === "\x1b") {
+      const m = seq.exec(rest);
+      if (!m) { acts.push("escape"); i++; continue; }
+      const param = m[1] || "", final = m[2] || m[3];
+      if (final === "A") acts.push("up");
+      else if (final === "B") acts.push("down");
+      else if (final === "H") acts.push("home");
+      else if (final === "F") acts.push("end");
+      else if (final === "Z") acts.push("up");
+      else if (final === "~") {
+        if (param === "5") acts.push("pageup");
+        else if (param === "6") acts.push("pagedown");
+        else if (param === "1" || param === "7") acts.push("home");
+        else if (param === "4" || param === "8") acts.push("end");
+      }
+      i += m[0].length;
+      continue;
+    }
+    const ch = s[i];
+    if (ch === "\r" || ch === "\n") acts.push("enter");
+    else if (ch === "\t") acts.push("down");
+    else if (ch === "\x03") acts.push("ctrl-c");
+    else if (ch === "\x0e") acts.push("down");
+    else if (ch === "\x10") acts.push("up");
+    else if (ch === "j") acts.push("down");
+    else if (ch === "k") acts.push("up");
+    i++;
+  }
+  return acts;
+}
+/* Index of a trailing escape sequence that may still be incomplete. */
+function incompleteEscape(s) {
+  const m = /\x1b(?:\[[0-9;]*|O)?$/.exec(s);
+  return m ? m.index : -1;
+}
+
 function uiMenu({ message, choices, header = [], initial = 0 }) {
   return new Promise((resolve) => {
+    if (!choices || !choices.length) return resolve(undefined);
     const stdin = process.stdin, stdout = process.stdout;
     let idx = Math.max(0, choices.findIndex(ch => ch.value === initial));
-    let scroll = 0, visible = 1, done = false;
+    let scroll = 0, visible = 1, done = false, buf = "", escTimer = null;
     const cols = () => Math.max(40, stdout.columns || 80);
     const rows = () => Math.max(14, stdout.rows || 30);
     const hasBack = choices.some(ch => ["back", "__back", "__home"].includes(String(ch.value)));
@@ -840,33 +901,61 @@ function uiMenu({ message, choices, header = [], initial = 0 }) {
     const finish = (val) => {
       if (done) return;
       done = true;
-      stdin.removeListener("keypress", onKey);
+      if (escTimer) { clearTimeout(escTimer); escTimer = null; }
+      stdin.removeListener("data", onData);
       stdout.removeListener("resize", render);
-      try { stdin.setRawMode(false); } catch {}
+      /* Keep raw mode ON between menus: toggling it for every menu transition
+         wedges stdin on Windows after a few Esc/Enter cycles (arrows stop). */
+      if (val === null) { try { stdin.setRawMode(false); } catch {} }
       stdout.write("\x1b[?25h\x1b[2J\x1b[H");
       resolve(val);
     };
 
-    const onKey = (str, key = {}) => {
-      if (key.ctrl && key.name === "c") { finish(null); process.exit(0); }
-      if (key.name === "escape") {
+    const step = (act) => {
+      if (done) return;
+      if (act === "ctrl-c") { finish(null); process.exit(0); }
+      if (act === "escape") {
         const back = choices.find(ch => ["back", "__back", "__home"].includes(String(ch.value)));
         return finish(back ? back.value : null);
       }
-      if (key.name === "return" || key.name === "enter") return finish(choices[idx].value);
-      if (key.name === "up" || key.name === "k") idx = (idx - 1 + choices.length) % choices.length;
-      else if (key.name === "down" || key.name === "j") idx = (idx + 1) % choices.length;
-      else if (key.name === "pageup") idx = Math.max(0, idx - visible);
-      else if (key.name === "pagedown") idx = Math.min(choices.length - 1, idx + visible);
-      else if (key.name === "home") idx = 0;
-      else if (key.name === "end") idx = choices.length - 1;
+      if (act === "enter") return finish(choices[Math.min(idx, choices.length - 1)]?.value);
+      if (act === "up") idx = (idx - 1 + choices.length) % choices.length;
+      else if (act === "down") idx = (idx + 1) % choices.length;
+      else if (act === "pageup") idx = Math.max(0, idx - visible);
+      else if (act === "pagedown") idx = Math.min(choices.length - 1, idx + visible);
+      else if (act === "home") idx = 0;
+      else if (act === "end") idx = choices.length - 1;
       else return;
       render();
+    };
+
+    const run = (str) => {
+      for (const a of parseMenuKeys(str)) { step(a); if (done) return; }
+    };
+
+    const onData = (d) => {
+      if (done) return;
+      buf += d.toString("utf8");
+      const cut = incompleteEscape(buf);
+      if (cut < 0) { const all = buf; buf = ""; return run(all); }
+      const head = buf.slice(0, cut);
+      buf = buf.slice(cut);
+      if (head) run(head);
+      if (done) return;
+      if (escTimer) clearTimeout(escTimer);
+      /* a lone Esc waits 35 ms for the rest of a possible sequence */
+      escTimer = setTimeout(() => {
+        escTimer = null;
+        if (done) return;
+        const held = buf; buf = "";
+        run(held);
+      }, 35);
     };
 
     const render = () => {
       const lay = menuLayout({ message, choices, header, idx, scroll, cols: cols(), rows: rows(), hint: `v${VERSION}` });
       scroll = lay.scroll; visible = lay.visible;
+      if (idx >= choices.length) idx = choices.length - 1;
       const ind = " ".repeat(lay.left);
       const hint = `↑↓ move   ·   enter select   ·   esc ${hasBack ? "back" : "quit"}`;
       stdout.write("\x1b[?25l\x1b[?2026h\x1b[2J\x1b[H" + "\n".repeat(lay.top) +
@@ -874,9 +963,9 @@ function uiMenu({ message, choices, header = [], initial = 0 }) {
         ind + c.soft(hint) + "\n\x1b[?2026l");
     };
 
-    stdin.setRawMode(true);
+    if (!stdin.isRaw) try { stdin.setRawMode(true); } catch {}
     stdin.resume();
-    stdin.on("keypress", onKey);
+    stdin.on("data", onData);
     stdout.on("resize", render);
     render();  });
 }
@@ -1006,6 +1095,7 @@ function logGateAttempt(locked) {
 async function lockSession(clear = true) {
   if (clear) console.clear();
   state.pass = null; state.payload = null;
+  state.kdfCache.clear();
   console.log(c.vio(" Session locked."));
   await unlockGate();
   ensureVault();
@@ -1098,7 +1188,10 @@ function hardenFile(p) {
     if (process.platform !== "win32") return;
     const u = process.env.USERNAME || "";
     if (!u) return;
-    execFileSync("icacls", [p, "/inheritance:r", "/grant:r", `${u}:F`], { stdio: "ignore", windowsHide: true });
+    /* Async on purpose: a synchronous icacls call freezes the whole menu for
+       ~100-400 ms on every vault write. Best effort, so no callback needed. */
+    execFile("icacls", [p, "/inheritance:r", "/grant:r", `${u}:F`],
+      { windowsHide: true }, () => {});
   } catch { /* best effort */ }
 }
 
@@ -1133,23 +1226,44 @@ function paddedJson(obj) {
   const target = Math.max(PAD_BUCKET, Math.ceil((bytes + 128) / PAD_BUCKET) * PAD_BUCKET);
   return s + " ".repeat(target - bytes);
 }
+/* Deriving the vault key with Argon2id costs ~1-3 s on purpose. Doing that on
+   every save() froze the whole menu each time a setting was toggled. We keep
+   the derived key (never the password) for this session, keyed by vault path
+   and password, and reuse the same salt. A new password or a new vault gets a
+   fresh salt+key, so the file format is unchanged. */
+function kdfCached(target, pass) {
+  const hit = state.kdfCache.get(target);
+  if (!hit || hit.pass !== pass) return null;
+  if (hit.kdf !== "argon2id" || hit.t !== KDF2.t || hit.m !== KDF2.m || hit.p !== KDF2.p) return null;
+  return hit;
+}
 export function encryptVault(payload, pass, file = VAULT_FILE) {
-  const salt = crypto.randomBytes(16), iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", kdfArgon(pass, salt), iv);
+  const target = path.resolve(file);
+  const cacheable = target === path.resolve(VAULT_FILE) || target === path.resolve(ACTIVE_VAULT);
+  const hit = cacheable ? kdfCached(target, pass) : null;
+  const salt = hit ? hit.salt : crypto.randomBytes(16);
+  const key = hit ? hit.key : kdfArgon(pass, salt);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
   const data = Buffer.concat([cipher.update(paddedJson(payload), "utf8"), cipher.final()]);
-  atomicWriteFile(file, JSON.stringify({
+  atomicWriteFile(target, JSON.stringify({
     app: "ravenne", v: 8, ...KDF2,
     salt: salt.toString("hex"), iv: iv.toString("hex"),
     tag: cipher.getAuthTag().toString("hex"), data: data.toString("base64"),
   }, null, 2));
-  hardenFile(file);
+  if (cacheable) state.kdfCache.set(target, { salt, key, pass, ...KDF2 });
 }
 export function decryptVault(pass, file = VAULT_FILE) {
   const meta = JSON.parse(fs.readFileSync(file, "utf8"));
-  const key = deriveKey(pass, Buffer.from(meta.salt, "hex"), meta);
+  const salt = Buffer.from(meta.salt, "hex");
+  const key = deriveKey(pass, salt, meta);
   const d = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(meta.iv, "hex"));
   d.setAuthTag(Buffer.from(meta.tag, "hex"));
-  return JSON.parse(Buffer.concat([d.update(Buffer.from(meta.data, "base64")), d.final()]).toString("utf8"));
+  const payload = JSON.parse(Buffer.concat([d.update(Buffer.from(meta.data, "base64")), d.final()]).toString("utf8"));
+  const target = path.resolve(file);
+  if (target === path.resolve(ACTIVE_VAULT))
+    state.kdfCache.set(target, { salt, key, pass, kdf: meta.kdf || "scrypt", t: meta.t, m: meta.m, p: meta.p });
+  return payload;
 }
 /* Try the main vault, then its .bak. Never deletes anything. */
 export function loadVaultResilient(pass, file = VAULT_FILE) {
@@ -1319,6 +1433,7 @@ async function pickProfile() {
         { title: "<- Back", value: "back" },
       ] });
       if (m === "back") { console.clear(); continue; }
+      if (m == null) continue;
       const { n } = await P({ type: "text", name: "n", message: m === "rename" ? "Wallet to rename:" : "Wallet to delete:" });
       if (m === "rename") { const { n2 } = await P({ type: "text", name: "n2", message: "New name:" }); await cmdProfile(["rename", n, n2]); }
       else await cmdProfile([
@@ -1327,6 +1442,7 @@ async function pickProfile() {
       console.clear();
       continue;
     }
+    if (a == null) continue;       // empty menu / cancelled: keep the current wallet
     V().active = a; save();
     return;
   }
@@ -2605,6 +2721,7 @@ async function cmdWipe(args) {
   let n = 0;
   for (const f of [...new Set(targets)]) if (secureErase(f)) { n++; console.log(c.dim("  · erased " + path.basename(f))); }
   state.payload = null;
+  state.kdfCache.clear();
   console.log(c.ok(`✓ Wipe complete (${n} item${n === 1 ? "" : "s"}, 3× random overwrite + delete).`));
   console.log(c.dim("  Relaunch to start a fresh vault."));
 }
@@ -3357,15 +3474,14 @@ async function vaultMode() {
   if (TTY) clack.intro(c.bold("VAULT") + c.dim("  secured long-term wallets · separate encrypted file · own password"));
   await vaultOpen();
   while (true) {
-    const a = await clack.select({ message: "Vault", options: [
-      { value: "list", label: "List / balances", hint: "addresses + balances on Ethereum" },
-      { value: "add", label: "Add a secured wallet", hint: "new 24-word seed — stored WITHOUT its private key" },
-      { value: "send", label: "Send from a vault wallet", hint: "key derived in memory, never written" },
-      { value: "seed", label: "Reveal a seed phrase", hint: "paper backup — shown once per session" },
-      { value: "back", label: "Back", hint: "lock the vault and return" },
+    const { a } = await P({ type: "select", name: "a", message: "Vault", choices: [
+      { title: "▤  List / balances", value: "list", description: "Addresses + balances on Ethereum." },
+      { title: "+  Add a secured wallet", value: "add", description: "New 24-word seed — stored WITHOUT its private key." },
+      { title: "↑  Send from a vault wallet", value: "send", description: "Key derived in memory, never written." },
+      { title: "*  Reveal a seed phrase", value: "seed", description: "Paper backup — shown once per session." },
+      { title: "<  Back", value: "back", description: "Lock the vault and return." },
     ]});
-    if (clack.isCancel(a)) continue;
-    if (a === "back") { vaultState.data = null; vaultState.pass = null; clack.outro("Vault locked."); return; }
+    if (a == null || a === "back") { vaultState.data = null; vaultState.pass = null; clack.outro("Vault locked."); return; }
     try {
       if (a === "list") {
         const sp = clack.spinner(); sp.start("Fetching balances…");
@@ -3379,6 +3495,7 @@ async function vaultMode() {
         sp.stop("Balances ✓");
         table(["LABEL", "ADDRESS", "BALANCE"], rows, { align: [null, null, "r"] });
         if (!vaultState.data.wallets.length) console.log(c.dim("  (empty — add a secured wallet)"));
+        await hold();
       } else if (a === "add") {
         const { l } = await P({ type: "text", name: "l", message: "Label for this wallet:" });
         const label = (l || "").trim() || ("vault-" + (vaultState.data.wallets.length + 1));
@@ -3413,6 +3530,7 @@ async function vaultMode() {
         const rc = await spin("Waiting for confirmation…", () => tx.wait());
         console.log(c.ok(`✓ Sent — fee ${fmtAmt(BigInt(rc.gasUsed) * BigInt(rc.effectiveGasPrice ?? 0n))} ETH`));
         printTxLink(rc.hash, "eth");
+        await hold();
       } else if (a === "seed") {
         const r = await P({ type: "text", name: "v", message: `Which wallet? (0-${vaultState.data.wallets.length - 1})` });
         const w = vaultState.data.wallets[parseInt(r.v, 10)];
@@ -3641,6 +3759,7 @@ async function cmdUsbRestore(args) {
     console.log(c.ok("  + restored " + f));
   }
   state.payload = null;
+  state.kdfCache.clear();
   return console.log(c.ok(`✓ ${n} file(s) restored — relaunch Ravenne.`));
 }
 
@@ -3788,6 +3907,7 @@ async function simpleMenu() {
     const { a } = await P({ type: "select", name: "a", message: "What do you want to do?",
       header: homeHeader(snap), choices });
     lastActive = Date.now();
+    let separatePress = true;
     try {
       if (a === "quit") { console.clear(); console.log("Bye."); process.exit(0); }
       else if (a === "refresh") { snap = null; continue; }
@@ -3820,13 +3940,15 @@ async function simpleMenu() {
       else if (a === "btc") await cmdBtc(["list"]);
       else if (a === "xmr") await cmdXmr(["list"]);
       else if (a === "priv") await cmdPrivacy();
-      else if (a === "set") await quickSettings();
-      else if (a === "sec") await securityMenu();
-      else if (a === "vault") await vaultMode();
-      else if (a === "adv") { await advancedMenu(true); }
+      /* these four are full menus: do not demand a separate Enter afterwards
+         (an extra blank prompt is where arrows look "dead") */
+      else if (a === "set") { separatePress = false; await quickSettings(); }
+      else if (a === "sec") { separatePress = false; await securityMenu(); }
+      else if (a === "vault") { separatePress = false; await vaultMode(); }
+      else if (a === "adv") { separatePress = false; await advancedMenu(true); }
     } catch (e) { console.log(c.err(`\n✗ ${e.message}`)); }
     snap = null;
-    await P({ type: "text", name: "_", message: c.dim("— Enter —") });
+    if (separatePress) await P({ type: "text", name: "_", message: c.dim("— Enter —") });
     lastActive = Date.now();
   }
 }
@@ -3909,9 +4031,10 @@ async function securityMenu() {
         `  check your local laws — none are integrated here on purpose.`,
       ]);
     } catch (e) { console.log(c.err(`✗ ${e.message}`)); }
+    await hold();
+    if (!state.payload) return;   // vault wiped: nothing left to manage here
   }
 }
-
 
 
 /* ═══════════════════════════ VAULT BACKUP / DIAGNOSTICS / EXTRA OPTIONS ═══════════════════════════ */
@@ -3950,6 +4073,7 @@ async function cmdRestore(args) {
   }
   if (!(await confirm("Restore now?"))) return console.log("Cancelled.");
   fs.copyFileSync(src, VAULT_FILE);
+  state.kdfCache.clear();
   state.payload = decryptVault(state.pass);
   console.log(c.ok(`✓ Vault restored: ${W().length} EVM + ${BW().length} BTC wallets, ${cur().history.length} tx history.`));
 }
@@ -3969,6 +4093,7 @@ async function cmdRecover(args) {
   try { fs.copyFileSync(file, `${file}.corrupt-${Date.now()}`); } catch {}
   fs.copyFileSync(bak, file);
   hardenFile(file);
+  state.kdfCache.clear();
   if (file === ACTIVE_VAULT) state.payload = payload;
   console.log(c.ok("Vault restored. Restart Ravenne."));
 }
@@ -4215,9 +4340,10 @@ async function networkSettings() {
             return r.ok;
           }).catch(() => false);
           console.log(ok ? c.ok("✓ Proxy works.") : c.err("✗ Proxy test failed."));
+          await hold();
         }
       }
-      if (a === "tor") await cmdTor([]);
+      if (a === "tor") { await cmdTor([]); await hold(); }
       if (a === "reqproxy") {
         const cfg = netConfig() || {};
         writeNetConfig({ ...cfg, requireProxy: !cfg.requireProxy });
@@ -4280,7 +4406,7 @@ async function privacySettings() {
     ]});
     if (a === "back") return;
     try {
-      if (a === "harden") await cmdHarden();
+      if (a === "harden") { await cmdHarden(); await hold(); }
       if (a === "bcast") {
         const next = (s.privacy?.broadcast || "auto") === "rpc" ? "private" : "rpc";
         (s.privacy ??= {}).broadcast = next; save();
@@ -4311,7 +4437,7 @@ async function privacySettings() {
         else { const [f, t] = v.split(" "); (s.convert ??= {}); s.convert.eth = { from: f, to: t }; save();
           console.log(c.ok(`✓ incoming → ${t}`)); }
       }
-      if (a === "dashboard") await cmdPrivacy();
+      if (a === "dashboard") { await cmdPrivacy(); await hold(); }
     } catch (e) { console.log(c.err(`✗ ${e.message}`)); }
   }
 }
@@ -4361,7 +4487,7 @@ async function walletSettings() {
         console.log(c.ok(`✓ theme ${v === "auto" ? (UI_LIGHT ? "light (detected)" : "dark (detected)") : v}`));
       }
       if (a === "btcnet") { s.btcTest = !s.btcTest; save(); console.log(c.ok(`✓ Bitcoin ${s.btcTest ? "testnet" : "mainnet"}`)); }
-      if (a === "overview") await cmdOverview();
+      if (a === "overview") { await cmdOverview(); await hold(); }
     } catch (e) { console.log(c.err(`✗ ${e.message}`)); }
   }
 }
@@ -4382,6 +4508,80 @@ async function quickSettings() {
     if (a === "priv") await privacySettings();
     if (a === "wallet") await walletSettings();
     if (a === "sec") await securityMenu();
+  }
+}
+
+/* RPC endpoints as a menu (the CLI command only prints a table). */
+async function rpcMenu() {
+  while (true) {
+    const s = settings();
+    const { a } = await P({ type: "select", name: "a", message: "RPC endpoints:",
+      choices: [
+        ...Object.keys(NET).map(k => ({ title: `${s.rpc[k] ? "•" : "·"}  ${NET[k].label}`,
+          value: k, description: s.rpc[k] || `${NET[k].rpc}  (default)` })),
+        { title: "<  Back", value: "back" },
+      ] });
+    if (a === "back" || a == null) return;
+    const { u } = await P({ type: "text", name: "u", initial: s.rpc[a] || "",
+      message: `${NET[a].label} RPC URL (empty = default):` });
+    if (!u) { delete s.rpc[a]; save(); console.log(c.ok(`✓ ${NET[a].label} → default`)); }
+    else if (!/^https?:\/\//.test(String(u).trim())) console.log(c.err("✗ URL must start with http:// or https://"));
+    else { s.rpc[a] = String(u).trim(); save(); console.log(c.ok(`✓ ${NET[a].label} → ${s.rpc[a]}`)); }
+  }
+}
+
+/* ERC-20 tokens: the description says "management", so give it a real menu. */
+async function tokensMenu() {
+  while (true) {
+    const k = netKey();
+    const list = tokensOf(k);
+    const { a } = await P({ type: "select", name: "a", message: `ERC-20 tokens — ${NET[k].label}:`,
+      choices: [
+        ...list.map(t => ({ title: `$  ${t.sym}`, value: `rm:${t.sym}`,
+          description: `Remove this token — ${t.addr}` })),
+        { title: "+  Add a token", value: "add", description: "Symbol + contract address (decimals read on-chain)." },
+        { title: "▤  Show balances", value: "show", description: "On-chain balance of each wallet." },
+        { title: "<  Back", value: "back" },
+      ] });
+    if (a === "back" || a == null) return;
+    if (a === "add") {
+      const r = await P([
+        { type: "text", name: "sym", message: "Token symbol (e.g. USDT):" },
+        { type: "text", name: "addr", message: "Contract address (0x…):" },
+      ]);
+      if (r.sym && r.addr) await cmdTokens(["add", String(r.sym).trim(), String(r.addr).trim()]);
+    } else if (a === "show") await cmdTokens([]);
+    else if (String(a).startsWith("rm:")) {
+      const sym = a.slice(3);
+      if (await confirm(`Remove ${sym} from ${NET[k].label}?`)) await cmdTokens(["remove", sym]);
+    }
+  }
+}
+
+/* Address book: same idea — list, add and remove from one menu. */
+async function bookMenu() {
+  while (true) {
+    const book = settings().book;
+    const { a } = await P({ type: "select", name: "a", message: "Address book:",
+      choices: [
+        ...book.map(b => ({ title: `#  ${b.label}`, value: `rm:${b.label}`,
+          description: `Remove — ${b.address}` })),
+        { title: "+  Add an entry", value: "add" },
+        { title: "▤  Show the book", value: "show" },
+        { title: "<  Back", value: "back" },
+      ] });
+    if (a === "back" || a == null) return;
+    if (a === "add") {
+      const r = await P([
+        { type: "text", name: "label", message: "Label:" },
+        { type: "text", name: "addr", message: "Address (0x…):" },
+      ]);
+      if (r.label && r.addr) await cmdBook(["add", String(r.label).trim(), String(r.addr).trim()]);
+    } else if (a === "show") await cmdBook([]);
+    else if (String(a).startsWith("rm:")) {
+      const label = a.slice(3);
+      if (await confirm(`Remove "${label}" from the book?`)) await cmdBook(["remove", label]);
+    }
   }
 }
 
@@ -5014,6 +5214,10 @@ async function runAction(a) {
     else if (a === "usbrestore")
       await cmdUsbRestore([(await P({ type: "text", name: "v", message: "Backup folder to restore from:" })).v]);
     else if (a === "lock") { await lockSession(); banner(); }
+    else if (a === "settings") await quickSettings();   // interactive, not the CLI panel
+    else if (a === "rpc") await rpcMenu();
+    else if (a === "tokens") await tokensMenu();
+    else if (a === "book") await bookMenu();
     else if (a?.startsWith("btc-")) await cmdBtc([a.slice(4)]);
     else if (a?.startsWith("xmr-")) await cmdXmr([a.slice(4)]);
     else await (MENU_ACTIONS[a] || (() => {}))([]);
@@ -5108,8 +5312,9 @@ async function advancedMenu(fromHome = false) {
                   : { title: "Quit", value: "__quit", description: "Clear the screen and exit." }],
     });
     lastActive = Date.now();
-    if (cat === "__home") return;
+    if (cat == null || cat === "__home") return;
     if (cat === "__quit") { console.clear(); console.log("Bye."); process.exit(0); }
+    if (!MENU[cat]) continue;
     while (true) {
       const { a } = await P({
         type: "select", name: "a", message: cat,
@@ -5121,7 +5326,9 @@ async function advancedMenu(fromHome = false) {
       if (a === "__back") break;
       await runAction(a);
       if (!state.payload) ensureVault();
-      await P({ type: "text", name: "_", message: c.dim("— Enter to continue —") });
+      /* menu-only actions already returned to a menu: no extra blank prompt */
+      if (!["settings", "rpc", "tokens", "book", "network", "lock"].includes(a))
+        await P({ type: "text", name: "_", message: c.dim("— Enter to continue —") });
       lastActive = Date.now();
     }
   }
@@ -5353,6 +5560,7 @@ async function main() {
     }
     await purgeExpired();
     await bootAnimation();
+    state.inMenu = true;
     return simpleMenu();
   }
   if (args[0] === "menu") {
@@ -5362,6 +5570,7 @@ async function main() {
     if (TTY && !state.autoYes && !state.flags.profile) await pickProfile();
     await purgeExpired();
     await bootAnimation();
+    state.inMenu = true;
     return advancedMenu();
   }
   if (["help", "-h", "--help"].includes(args[0])) { console.log(HELP); return; }
@@ -5381,7 +5590,7 @@ async function main() {
 }
 
 /* Test hooks (pure helpers only — no wallet state required). */
-export const _internals = { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, utxoKey, liveUtxos, atomicWriteFile, readJsonResilient, isLightRgb, menuLayout, menuRow, ghostData, ghostScale, ghostPaint, ghostLayout, bootScreen };
+export const _internals = { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, utxoKey, liveUtxos, atomicWriteFile, readJsonResilient, isLightRgb, menuLayout, menuRow, parseMenuKeys, incompleteEscape, ghostData, ghostScale, ghostPaint, ghostLayout, bootScreen };
 
 /* Direct execution — including bundled .cjs and pkg .exe forms. */
 const isMain = (() => {

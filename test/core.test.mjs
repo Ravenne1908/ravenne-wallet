@@ -13,7 +13,7 @@ import {
   btcAddressFromPhrase, btcChangeFromPhrase, buildBtcTx, mergeChainTx,
 } from "../ravenne.js";
 
-const { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, liveUtxos, atomicWriteFile, readJsonResilient, isLightRgb, menuLayout, menuRow, ghostData, ghostScale, ghostPaint, ghostLayout, bootScreen } = _internals;
+const { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, liveUtxos, atomicWriteFile, readJsonResilient, isLightRgb, menuLayout, menuRow, parseMenuKeys, incompleteEscape, ghostData, ghostScale, ghostPaint, ghostLayout, bootScreen } = _internals;
 
 const tmp = () => path.join(os.tmpdir(), `ravenne-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
 
@@ -202,6 +202,38 @@ test("menu rows align icons in their own column", () => {
   assert.deepEqual(menuRow("R  Refresh"), { icon: "R", label: "Refresh" });
   assert.deepEqual(menuRow("  Manage (list / rename / delete)"), { icon: " ", label: "Manage (list / rename / delete)" });
   assert.deepEqual(menuRow("Back"), { icon: " ", label: "Back" });
+  // a long word followed by spaces must NOT lose its first letter as an "icon"
+  assert.deepEqual(menuRow("Short  (45 frames, ~1.5 s)"), { icon: " ", label: "Short  (45 frames, ~1.5 s)" });
+  assert.deepEqual(menuRow("Full   (235 frames)"), { icon: " ", label: "Full   (235 frames)" });
+});
+
+test("menu layout survives an empty choice list", () => {
+  const lay = menuLayout({ message: "Nothing", choices: [], idx: 0, cols: 80, rows: 24 });
+  assert.equal(lay.visible, 0);
+  assert.ok(lay.lines.length > 0);
+  assert.ok(lay.lines.every(l => typeof l === "string"));
+});
+
+test("menu key parser reads arrows, enter, esc and survives Esc+arrow", () => {
+  assert.deepEqual(parseMenuKeys("\x1b[B"), ["down"]);
+  assert.deepEqual(parseMenuKeys("\x1b[A"), ["up"]);
+  assert.deepEqual(parseMenuKeys("\x1bOB"), ["down"]);
+  assert.deepEqual(parseMenuKeys("\x1b[5~"), ["pageup"]);
+  assert.deepEqual(parseMenuKeys("\x1b[6~"), ["pagedown"]);
+  assert.deepEqual(parseMenuKeys("\x1b[Z"), ["up"]);
+  assert.deepEqual(parseMenuKeys("\r"), ["enter"]);
+  assert.deepEqual(parseMenuKeys("\x03"), ["ctrl-c"]);
+  assert.deepEqual(parseMenuKeys("j"), ["down"]);
+  // the regression: Esc then an arrow must keep BOTH actions
+  assert.deepEqual(parseMenuKeys("\x1b\x1b[B"), ["escape", "down"]);
+  assert.deepEqual(parseMenuKeys("\x1b\x1b[A"), ["escape", "up"]);
+  // a lone Esc is an action; a trailing ESC[ is not yet parseable
+  assert.deepEqual(parseMenuKeys("\x1b"), ["escape"]);
+  assert.deepEqual(parseMenuKeys("\x1b["), ["escape"]);
+  assert.equal(incompleteEscape("\x1b"), 0);
+  assert.equal(incompleteEscape("\x1b["), 0);
+  assert.equal(incompleteEscape("\x1b[A"), -1);
+  assert.equal(incompleteEscape("abc\x1b[1;5"), 3);
 });
 
 test("ghost animation decodes and scales to any size", () => {
