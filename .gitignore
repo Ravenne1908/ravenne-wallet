@@ -31,3 +31,6 @@ _*.tmp
 tools/monero/wallets/
 tools/monero/*.zip
 src-tauri/target/
+.smoke/
+gost/__pycache__/
+gost/**/*.pyc

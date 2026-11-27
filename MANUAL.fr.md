@@ -1,6 +1,6 @@
 # Ravenne Wallet — Manuel d'utilisation (français)
 
-Version 9.10.0 · Windows · Node.js 18+ · licence MIT
+Version 9.11.0 · Windows · Node.js 18+ · licence MIT
 
 Ravenne est un wallet crypto **100 % local, 100 % terminal**. Aucun compte,
 aucun serveur, aucune télémétrie, **aucune activation**. Toutes les clés
@@ -72,6 +72,24 @@ lancer.
      stockées (clés dérivées en mémoire).
 
 Aucun code d'activation, aucun webhook, aucun appel sortant pour démarrer.
+
+### Splash et interface
+
+Au lancement, Ravenne joue un **splash fantôme** monochrome (235 frames,
+GhosttyFetch, MIT) dimensionné à la fenêtre, avec une barre de progression.
+N'importe quelle touche le passe.
+
+- `Settings → Wallet & display` :
+  - **Launch animation** — on/off
+  - **Splash length** — short (~1,5 s), normal (~2,4 s), full (~4,3 s)
+  - **Preview the splash** — rejoue l'animation sans redémarrer
+  - **Theme** — auto (détection OSC 11), light, dark
+- CLI : `--anim short|normal|full`, `--no-anim` ; `RAVENNE_NO_ANIM=1` aussi.
+- Le splash et les menus ne posent que des couleurs de **premier plan** :
+  une image de fond Windows Terminal reste visible. Sur fond clair la palette
+  passe en gris foncés ; force `--theme light` si la détection se trompe.
+- Le menu est centré, défile avec `↑ n more / ↓ n more`, se recentre au
+  redimensionnement, et `esc` revient en arrière.
 
 ---
 
@@ -282,6 +300,9 @@ usbrestore <dossier>
 --keystore <f>  keystore pour tx-sign
 --broadcast private|rpc
 --profile <nom>
+--theme light|dark           forcer la palette (défaut : détection)
+--anim short|normal|full     longueur du splash
+--no-anim                    passer le splash
 --no-vpn · --no-proxy        contourner une garde (déconseillé)
 ```
 
@@ -453,7 +474,7 @@ exclusions.
 ## 12. Tests, build, licence
 
 ```powershell
-npm test       # node:test — 17 tests
+npm test       # node:test — 22 tests
 .\build.bat    # exe + zip
 ```
 

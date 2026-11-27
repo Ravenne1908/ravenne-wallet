@@ -34,6 +34,7 @@ copy /y README.md dist\ >nul
 copy /y MANUAL.fr.md dist\ >nul
 copy /y MANUAL.en.md dist\ >nul
 copy /y LICENSE dist\ >nul
+copy /y THIRD_PARTY_NOTICES.md dist\ >nul
 > dist\ravenne.bat echo @echo off
 >> dist\ravenne.bat echo chcp 65001 ^>nul
 >> dist\ravenne.bat echo title Ravenne Wallet

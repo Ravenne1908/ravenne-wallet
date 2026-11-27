@@ -20,6 +20,8 @@ import { argon2id } from "@noble/hashes/argon2";
 import { exec, execFileSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import readline from "node:readline";
+import zlib from "node:zlib";
+import { GHOST_ASSET } from "./assets/ghost.js";
 
 /* Bitcoin */
 import * as bitcoin from "bitcoinjs-lib";
@@ -27,7 +29,7 @@ import { HDKey } from "@scure/bip32";
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
-const VERSION = "9.10.0";
+const VERSION = "9.11.0";
 process.title = "Ravenne Wallet";
 
 /* Network-layer privacy: route ALL outgoing HTTP (RPC, explorers, prices)
@@ -107,20 +109,199 @@ async function detectTheme() {
   });
 }
 
-async function bootAnimation() {
-  if (!TTY || !process.stdin.isTTY || state.autoYes) return;
-  if (process.env.RAVENNE_NO_ANIM === "1") return;
-  if (settings().animations === false) return;
+/* ─────────── Ghost splash (GhosttyFetch animation, MIT) ───────────
+   The 235 frames live gzip-compressed in assets/ghost.js, so the splash works
+   from the single-file bundle and the standalone .exe. Frames are resized with
+   a majority-vote sampler (same idea as the original project) and painted with
+   foreground colors only: a bright outline plus a scrolling gray gradient.
+   Nothing paints a background, so a Windows Terminal background image stays
+   visible. */
+const GHOST_OPEN = '<span class="b">', GHOST_CLOSE = "</span>";
+let _ghost = null, _ghostSizes = new Map();
+
+function ghostData() {
+  if (_ghost) return _ghost;
+  const json = zlib.gunzipSync(Buffer.from(GHOST_ASSET.gz, "base64")).toString("utf8");
+  const d = JSON.parse(json);
+  const raw = (d.frames || []).map(f => Array.isArray(f) ? f.join("\n") : String(f));
+  if (!raw.length) throw new Error("empty ghost animation");
+  _ghost = { w: d.max_width || GHOST_ASSET.width, h: d.lines_per_frame || GHOST_ASSET.height, raw };
+  return _ghost;
+}
+
+function ghostParse(line) {
+  if (!line.includes(GHOST_OPEN)) return { text: line, mask: new Uint8Array(line.length) };
+  const text = [], mask = [];
+  let on = 0;
+  for (let i = 0; i < line.length;) {
+    if (line.startsWith(GHOST_OPEN, i)) { on = 1; i += GHOST_OPEN.length; continue; }
+    if (line.startsWith(GHOST_CLOSE, i)) { on = 0; i += GHOST_CLOSE.length; continue; }
+    text.push(line[i]); mask.push(on); i++;
+  }
+  return { text: text.join(""), mask: Uint8Array.from(mask) };
+}
+
+/* Destination cell -> source cells it covers (voting when shrinking). */
+function ghostMap(src, dst) {
+  if (dst <= 0) return [];
+  if (src <= 0) return Array.from({ length: dst }, () => []);
+  if (src === dst) return Array.from({ length: dst }, (_, i) => [i]);
+  if (src > dst) {
+    const out = [];
+    for (let i = 0; i < dst; i++) {
+      const a = Math.floor((i * src) / dst);
+      let b = Math.ceil(((i + 1) * src) / dst);
+      if (b <= a) b = a + 1;
+      if (b > src) b = src;
+      const cells = [];
+      for (let k = a; k < b; k++) cells.push(k);
+      out.push(cells);
+    }
+    return out;
+  }
+  if (src === 1) return Array.from({ length: dst }, () => [0]);
+  const step = (src - 1) / (dst - 1);
+  return Array.from({ length: dst }, (_, i) => [Math.min(Math.floor(i * step), src - 1)]);
+}
+
+function ghostVote(text, mask, cols) {
+  const counts = new Map();
+  let brand = 0, total = 0;
+  for (const c of cols) {
+    const ch = text[c];
+    if (ch === undefined) continue;
+    counts.set(ch, (counts.get(ch) || 0) + 1);
+    brand += mask[c];
+    total++;
+  }
+  if (!total) return [" ", 0];
+  let best = " ", n = -1;
+  for (const [ch, k] of counts) if (k > n) { best = ch; n = k; }
+  return [best, brand * 2 >= total ? 1 : 0];
+}
+
+function ghostScale(raw, sw, sh, dw, dh) {
+  const src = [];
+  const lines = raw.split("\n");
+  for (let y = 0; y < sh; y++) {
+    const p = ghostParse(lines[y] ?? "");
+    const text = p.text.padEnd(sw, " ").slice(0, sw);
+    const mask = new Uint8Array(sw);
+    mask.set(p.mask.subarray(0, sw));
+    src.push({ text, mask });
+  }
+  const cols = ghostMap(sw, dw), rows = ghostMap(sh, dh);
+  const out = [];
+  for (const rs of rows) {
+    const text = [], mask = new Uint8Array(dw);
+    for (let x = 0; x < dw; x++) {
+      const cs = cols[x];
+      if (cs.length === 1) {
+        text.push(src[rs[0]].text[cs[0]]);
+        mask[x] = src[rs[0]].mask[cs[0]];
+      } else {
+        const chars = [], brands = [];
+        for (const r of rs) for (const c of cs) {
+          const ch = src[r].text[c];
+          if (ch === undefined) continue;
+          chars.push(ch); brands.push(src[r].mask[c]);
+        }
+        const [ch, b] = ghostVote(chars.join(""), brands, chars.map((_, i) => i));
+        text.push(ch); mask[x] = b;
+      }
+    }
+    out.push({ text: text.join(""), mask });
+  }
+  return out;
+}
+
+function ghostFrame(i, sw, sh, dw, dh) {
+  const key = `${dw}x${dh}`;
+  let bucket = _ghostSizes.get(key);
+  if (!bucket) {
+    if (_ghostSizes.size >= 4) _ghostSizes.delete(_ghostSizes.keys().next().value);
+    bucket = new Map();
+    _ghostSizes.set(key, bucket);
+  }
+  let frame = bucket.get(i);
+  if (!frame) { frame = ghostScale(_ghost.raw[i], sw, sh, dw, dh); bucket.set(i, frame); }
+  return frame;
+}
+
+/* Foreground-only painting: outline bright, fill in a scrolling gray ramp.
+   `fade` (0..1) blends every shade toward the terminal background. */
+function ghostPaint(frame, { scroll = 0, fade = 1 } = {}) {
+  const darkRamp = [255, 253, 251, 249, 247, 245, 243, 241, 239, 237];
+  const lightRamp = [244, 242, 240, 238, 236, 234, 232];
+  const ramp = UI_LIGHT ? lightRamp : darkRamp;
+  const brand = UI_LIGHT ? 232 : 255;
+  const shade = lvl => UI_LIGHT
+    ? Math.round(255 - (255 - lvl) * fade)
+    : Math.round(232 + (lvl - 232) * fade);
+
+  let start = -1, end = -1;
+  frame.forEach((l, i) => { if (l.text.trim()) { if (start < 0) start = i; end = i; } });
+  const artH = start < 0 ? 0 : end - start + 1;
+  const lines = [];
+
+  for (let i = 0; i < frame.length; i++) {
+    const row = frame[i];
+    let fill = null;
+    if (artH > 0 && i >= start && i <= end) {
+      const rel = i - start;
+      const shifted = artH <= 1 ? 0 : (rel + artH - (scroll % artH)) % artH;
+      const gi = artH <= 1 ? 0 : Math.floor((shifted * (ramp.length - 1)) / (artH - 1));
+      fill = `\x1b[38;5;${shade(ramp[gi])}m`;
+    }
+    let out = "", active = null;
+    for (let x = 0; x < row.text.length;) {
+      const isBrand = row.mask[x];
+      let j = x + 1;
+      while (j < row.text.length && row.mask[j] === isBrand) j++;
+      const code = isBrand ? `\x1b[1;38;5;${shade(brand)}m` : fill;
+      if (code !== active) { out += code || "\x1b[0m"; active = code; }
+      out += row.text.slice(x, j);
+      x = j;
+    }
+    if (active !== null) out += "\x1b[0m";
+    lines.push(out.replace(/\s+$/, ""));
+  }
+  return lines;
+}
+
+function ghostLayout(cols, rows, sw, sh) {
+  const chrome = 6;                       // blank + wordmark + tagline + status + gap
+  let h = Math.min(36, rows - chrome);
+  let w = Math.floor((h * sw) / sh);
+  if (w > cols - 4) { w = cols - 4; h = Math.floor((w * sh) / sw); }
+  if (w < 22 || h < 7) return null;
+  return { w, h, top: Math.max(0, Math.floor((rows - (h + chrome)) / 2)) };
+}
+
+const centerText = (s, cols) =>
+  " ".repeat(Math.max(0, Math.floor((cols - stripA(s).length) / 2))) + s;
+
+function ghostBar(p, width) {
+  const w = Math.max(10, Math.min(34, width));
+  const n = Math.round(Math.max(0, Math.min(1, p)) * w);
+  return c.soft("[") + c.bold("█".repeat(n)) + c.soft("░".repeat(w - n)) + c.soft("]");
+}
+
+/* Static boot screen used when the animation is disabled or cannot run. */
+async function bootPlain(reveal = true) {
   const out = process.stdout;
   out.write("\x1b[2J\x1b[H");
-  const pad = "  ";
   const title = "RAVENNE";
-  for (let i = 1; i <= title.length; i++) {
-    out.write("\r" + pad + c.bold(title.slice(0, i)) + " ".repeat(title.length - i));
-    await sleep(28);
+  if (reveal) {
+    for (let i = 1; i <= title.length; i++) {
+      out.write("\r  " + c.bold(title.slice(0, i)) + " ".repeat(title.length - i));
+      await sleep(24);
+    }
+  } else {
+    out.write("  " + c.bold(title));
   }
-  out.write("\n" + pad + c.soft(`v${VERSION}  ·  local-first crypto wallet`) + "\n\n");
-  await sleep(90);
+  out.write("\n  " + c.soft(`v${VERSION}  ·  local-first crypto wallet`) + "\n\n");
+  await sleep(80);
   const rows = [
     ["vault", "unlocked"],
     ["wallet", V().active],
@@ -130,10 +311,101 @@ async function bootAnimation() {
     ["tunnel", PROXY ? "proxy on" : "none — sends blocked"],
   ];
   for (const [k, v] of rows) {
-    out.write("\r" + pad + c.soft(k.padEnd(11)) + "  " + v + "\n");
-    await sleep(70);
+    out.write("  " + c.soft(k.padEnd(11)) + "  " + v + "\n");
+    await sleep(reveal ? 60 : 0);
   }
-  await sleep(140);
+  await sleep(320);
+}
+
+/* Full splash screen (pure): ghost + wordmark + progress/status, centered. */
+function bootScreen({ cols, rows, lay, frame, progress = 0, fade = 1, final = false, status = "" }) {
+  const L = [];
+  const top = lay ? lay.top : Math.max(0, Math.floor((rows - 7) / 2));
+  for (let i = 0; i < top; i++) L.push("");
+  if (lay && frame) {
+    const pad = " ".repeat(Math.max(0, Math.floor((cols - lay.w) / 2)));
+    for (const line of ghostPaint(frame, { scroll: Math.floor(progress * 48), fade })) L.push(pad + line);
+    L.push("");
+  }
+  L.push(centerText(c.bold(cols >= 46 ? "R A V E N N E" : "RAVENNE"), cols));
+  L.push(centerText(c.soft(`local-first crypto wallet  ·  v${VERSION}`), cols));
+  L.push(centerText(final ? c.soft(fit(status, cols - 4)) : ghostBar(progress, cols - 8), cols));
+  L.push("");
+  return L;
+}
+
+async function bootAnimation(force = false) {
+  if (!TTY || !process.stdin.isTTY || state.autoYes) return;
+  if (process.env.RAVENNE_NO_ANIM === "1" || state.flags?.noAnim) return;
+  const s = settings();
+  if (s.animations === false && !force) return;
+
+  let data = null;
+  try { data = ghostData(); } catch { data = null; }
+  if (!data) return bootPlain();
+
+  const out = process.stdout, stdin = process.stdin;
+  const mode = ["short", "normal", "full"].includes(state.flags?.anim) ? state.flags.anim
+    : ["short", "normal", "full"].includes(s.animMode) ? s.animMode : "normal";
+  const total = mode === "short" ? 45 : mode === "full" ? data.raw.length : 72;
+  const fps = mode === "full" ? 55 : 30;
+  const first = mode === "full" ? 0 : Math.min(96, data.raw.length - 1);
+
+  let cols = Math.max(40, out.columns || 80);
+  let rows = Math.max(14, out.rows || 30);
+  let lay = ghostLayout(cols, rows, data.w, data.h);
+  let skipped = false;
+  const onKey = (str, key = {}) => {
+    if (key.ctrl && key.name === "c") {
+      stdin.removeListener("keypress", onKey);
+      try { stdin.setRawMode(false); } catch {}
+      out.write("\x1b[?25h\x1b[0m\n");
+      process.exit(0);
+    }
+    skipped = true;
+  };
+  const status = `${V().active}  ·  ${N().label}  ·  ${PROXY ? "proxy on" : "no proxy"}  ·  ` +
+    `${process.env.WT_SESSION ? "Windows Terminal" : "console"}  ·  ${UI_LIGHT ? "light" : "dark"}`;
+
+  const draw = (frameIndex, progress, fade, final = false) => {
+    const frame = lay ? ghostFrame(frameIndex, data.w, data.h, lay.w, lay.h) : null;
+    const L = bootScreen({ cols, rows, lay, frame, progress, fade, final, status });
+    out.write("\x1b[?2026h\x1b[H" + L.map(l => l + "\x1b[K").join("\n") + "\x1b[0J\x1b[?2026l");
+  };
+
+  stdin.on("keypress", onKey);
+  try { stdin.setRawMode(true); } catch {}
+  stdin.resume();
+  out.write("\x1b[2J\x1b[H\x1b[?25l");
+  const started = Date.now();
+  let last = -1;
+
+  try {
+    while (true) {
+      const nc = Math.max(40, out.columns || cols);
+      const nr = Math.max(14, out.rows || rows);
+      if (nc !== cols || nr !== rows) {
+        cols = nc; rows = nr;
+        lay = ghostLayout(cols, rows, data.w, data.h);
+        out.write("\x1b[2J");
+      }
+      const elapsed = (Date.now() - started) / 1000;
+      const n = Math.floor(elapsed * fps);
+      if (n >= total || skipped) break;
+      if (n !== last) {
+        const fade = Math.min(1, (n + 1) / 6);
+        draw((first + n) % data.raw.length, n / Math.max(1, total - 1), fade);
+        last = n;
+      }
+      await sleep(Math.max(8, Math.floor(1000 / fps)));
+    }
+    draw((first + total - 1) % data.raw.length, 1, 1, true);
+    await sleep(skipped ? 140 : 480);
+  } finally {
+    stdin.removeListener("keypress", onKey);
+    try { stdin.setRawMode(false); } catch {}
+    out.write("\x1b[2J\x1b[H\x1b[?25h");
+  }
 }
 /* When compiled to an .exe (pkg), files must live NEXT TO the exe (snapshot FS is read-only).
    In a CJS bundle, import.meta.url is unavailable — fall back to argv[1]. */
@@ -219,6 +491,7 @@ const c = {
   soft:   s => TTY ? `${UI_LIGHT ? "\x1b[38;5;240m" : "\x1b[90m"}${s}\x1b[0m` : s,
   blue:   s => s,
   inv:    s => TTY ? `\x1b[7m${s}\x1b[0m` : s,
+  sel:    s => TTY ? `\x1b[1;4m${s}\x1b[0m` : s,
 };
 const tag = (label, on, okText = label) =>
   on ? c.ok(`● ${okText}`) : c.soft(`○ ${label}`);
@@ -248,6 +521,7 @@ const DEFAULT_SETTINGS = {
   vpnCheck: true,                   // refuse to connect without an active VPN
   vpnFailClosed: true,              // if the check cannot run, BLOCK (privacy default)
   animations: true,                 // boot animation (TTY only)
+  animMode: "normal",               // "short" | "normal" | "full"
   autolockMin: 5, rpc: {}, tokens: {}, book: [], explorers: {}, btcTest: false,
   privacy: {
     retainPermille: 3,              // EVM sweeps keep a random 0–0.3% behind
@@ -390,13 +664,14 @@ const fit = (s, w) => {
 
 function banner() {
   if (TTY) console.clear();
+  const w = Math.min(60, availW());
+  const left = c.bold("RAVENNE") + c.soft(`   v${VERSION}`);
+  const right = state.payload ? c.soft(`${N().label}   ·   ${V().active}`) : "";
+  const gap = w - stripA(left).length - stripA(right).length;
   console.log("");
-  console.log(MARGIN + c.bold("RAVENNE") + c.soft(`   v${VERSION}`));
-  console.log(MARGIN + c.soft("local-first crypto wallet"));
-  if (state.payload) {
-    console.log(MARGIN + c.soft("wallet ") + c.bold(V().active) + c.soft("   ·   ") + c.bold(N().label));
-  }
-  console.log(MARGIN + hrule(Math.min(60, Math.max(28, termW() - 4))));
+  console.log(MARGIN + (right && gap >= 2 ? left + " ".repeat(gap) + right : left));
+  if (!state.payload) console.log(MARGIN + c.soft("local-first crypto wallet"));
+  console.log(MARGIN + hrule(w));
 }
 
 function header(title) {
@@ -408,8 +683,9 @@ function header(title) {
 /* Clean label/value panel: no borders, aligned columns. */
 function panel(title, rows) {
   const lw = Math.max(4, ...rows.map(r => stripA(String(r[0])).length));
+  const ruleW = Math.max(4, Math.min(60, availW()) - stripA(title).length - 2);
   console.log("");
-  console.log(MARGIN + c.soft(title));
+  console.log(MARGIN + c.soft(title) + "  " + c.soft("─".repeat(ruleW)));
   for (const [label, value, note] of rows) {
     console.log(MARGIN + c.soft(String(label).padEnd(lw)) + "   " + value +
       (note ? "   " + c.soft(String(note)) : ""));
@@ -507,7 +783,15 @@ if (TTY && process.stdin.isTTY) readline.emitKeypressEvents(process.stdin);
 
 /* Centered, scrollable menu drawn by Ravenne itself (not clack).
    Returns the selected value, or null on Esc. */
-function menuLayout({ message, choices, header = [], idx = 0, scroll = 0, cols = 80, rows = 30 }) {
+/* Split a choice title into its single-glyph icon and its label, so every
+   row lines up on the same column (titles without an icon get a blank cell). */
+function menuRow(title) {
+  const m = /^(\S)\s{2,}(.*)$/.exec(String(title ?? ""));
+  return m ? { icon: m[1], label: m[2] }
+           : { icon: " ", label: String(title ?? "").replace(/^>\s+/, "").trim() };
+}
+
+function menuLayout({ message, choices, header = [], idx = 0, scroll = 0, cols = 80, rows = 30, hint = "" }) {
   const I = Math.min(76, cols - 4);
   const tw = I - 2;
   const title = fit(message || "", I - 6);
@@ -519,17 +803,23 @@ function menuLayout({ message, choices, header = [], idx = 0, scroll = 0, cols =
   const above = scroll > 0, below = scroll + visible < choices.length;
   const pad = (s, w) => s + " ".repeat(Math.max(0, w - stripA(s).length));
   const L = [];
-  L.push(c.soft("┌─ ") + c.bold(title) + " " +
-    c.soft("─".repeat(Math.max(0, I - stripA(title).length - 3))) + c.soft("┐"));
+  /* Title bar: ┌─ Title ─────────── v9.11.0 ─┐ (hint dropped if it does not fit) */
+  const hintTxt = hint && I - 6 - stripA(title).length - stripA(hint).length >= 1 ? hint : "";
+  const right = hintTxt ? ` ${hintTxt} ─` : "─";
+  const fill = Math.max(0, I - 3 - stripA(title).length - stripA(right).length);
+  L.push(c.soft("┌─ ") + c.bold(title) + " " + c.soft("─".repeat(fill)) + c.soft(right) + c.soft("┐"));
   for (const h of header) L.push(c.soft("│") + " " + pad(fit(h, tw), tw) + " " + c.soft("│"));
   if (header.length) L.push(c.soft("│") + " " + c.soft("─".repeat(tw)) + " " + c.soft("│"));
-  if (above) L.push(c.soft("│") + " " + c.soft(pad("  ↑ more", tw)) + " " + c.soft("│"));
+  if (above) L.push(c.soft("│") + " " + c.soft(pad(`  ↑ ${scroll} more`, tw)) + " " + c.soft("│"));
   for (let i = scroll; i < scroll + visible; i++) {
-    const label = fit(choices[i].title, tw - 4);
-    if (i === idx) L.push(c.soft("│") + " " + c.inv((" › " + label).padEnd(tw, " ")) + " " + c.soft("│"));
-    else L.push(c.soft("│") + " " + pad("   " + label, tw) + " " + c.soft("│"));
+    const { icon, label } = menuRow(choices[i].title);
+    const text = fit(label, tw - 5);
+    const body = i === idx
+      ? c.bold("›") + " " + icon + "  " + c.sel(pad(text, tw - 5))
+      : "  " + icon + "  " + pad(text, tw - 5);
+    L.push(c.soft("│") + " " + body + " " + c.soft("│"));
   }
-  if (below) L.push(c.soft("│") + " " + c.soft(pad("  ↓ more", tw)) + " " + c.soft("│"));
+  if (below) L.push(c.soft("│") + " " + c.soft(pad(`  ↓ ${choices.length - scroll - visible} more`, tw)) + " " + c.soft("│"));
   L.push(c.soft("│") + " " + c.soft("─".repeat(tw)) + " " + c.soft("│"));
   L.push(c.soft("│") + " " + c.soft(pad(fit(choices[idx]?.description || "", tw), tw)) + " " + c.soft("│"));
   L.push(c.soft("└" + "─".repeat(I) + "┘"));
@@ -545,7 +835,7 @@ function uiMenu({ message, choices, header = [], initial = 0 }) {
     let scroll = 0, visible = 1, done = false;
     const cols = () => Math.max(40, stdout.columns || 80);
     const rows = () => Math.max(14, stdout.rows || 30);
-    const pad = (s, w) => s + " ".repeat(Math.max(0, w - stripA(s).length));
+    const hasBack = choices.some(ch => ["back", "__back", "__home"].includes(String(ch.value)));
 
     const finish = (val) => {
       if (done) return;
@@ -553,7 +843,7 @@ function uiMenu({ message, choices, header = [], initial = 0 }) {
       stdin.removeListener("keypress", onKey);
       stdout.removeListener("resize", render);
       try { stdin.setRawMode(false); } catch {}
-      stdout.write("\x1b[2J\x1b[H");
+      stdout.write("\x1b[?25h\x1b[2J\x1b[H");
       resolve(val);
     };
 
@@ -575,12 +865,13 @@ function uiMenu({ message, choices, header = [], initial = 0 }) {
     };
 
     const render = () => {
-      const lay = menuLayout({ message, choices, header, idx, scroll, cols: cols(), rows: rows() });
+      const lay = menuLayout({ message, choices, header, idx, scroll, cols: cols(), rows: rows(), hint: `v${VERSION}` });
       scroll = lay.scroll; visible = lay.visible;
       const ind = " ".repeat(lay.left);
-      stdout.write("\x1b[2J\x1b[H" + "\n".repeat(lay.top) +
+      const hint = `↑↓ move   ·   enter select   ·   esc ${hasBack ? "back" : "quit"}`;
+      stdout.write("\x1b[?25l\x1b[?2026h\x1b[2J\x1b[H" + "\n".repeat(lay.top) +
         lay.lines.map(l => ind + l).join("\n") + "\n" +
-        ind + c.soft("↑↓ move   ·   enter select   ·   esc back / cancel") + "\n");
+        ind + c.soft(hint) + "\n\x1b[?2026l");
     };
 
     stdin.setRawMode(true);
@@ -1066,6 +1357,7 @@ function ensureVault() {
   s.privacy = { ...DEFAULT_SETTINGS.privacy, ...(s.privacy || {}) };
   s.seeds ??= {}; s.prices ??= false; s.vpnCheck ??= true; s.vpnFailClosed ??= true;
   s.animations ??= true;
+  s.animMode = ["short", "normal", "full"].includes(s.animMode) ? s.animMode : "normal";
   s.btcApi ??= null;
   s.xmrRpc ??= null; s.xmrRpcAuth ??= null; s.xmrDaemon ??= null; s.xmrStage ??= false; s.xmrFiles ??= {};
   /* migration: vaults from v6.3 and earlier held ONE set of wallets directly */
@@ -4029,10 +4321,12 @@ async function walletSettings() {
     const s = settings();
     const { a } = await P({ type: "select", name: "a", message: "Wallet & display:", choices: [
       { title: `#  Auto-lock: ${s.autolockMin} min`, value: "lock", description: "0 = never." },
-      { title: `*  Launch animation: ${s.animations === false ? "OFF" : "ON"}`, value: "anim", description: "Short boot animation (TTY only)." },
+      { title: `*  Launch animation: ${s.animations === false ? "OFF" : "ON"}`, value: "anim", description: "Ghost splash on startup (TTY only)." },
+      { title: `▸  Splash length: ${s.animMode}`, value: "animmode", description: "short = 1.5 s · normal = 2.4 s · full = one cycle." },
       { title: `◐  Theme: ${UI_LIGHT ? "light" : "dark"} (auto-detected)`, value: "theme", description: "Adapt colors to the terminal background." },
       { title: `₿  Bitcoin network: ${s.btcTest ? "testnet" : "mainnet"}`, value: "btcnet", description: "Switch BTC mainnet/testnet." },
       { title: "▤  Show overview", value: "overview", description: "Print the balance dashboard now." },
+      { title: "◈  Preview the splash", value: "preview", description: "Play the animation once without restarting." },
       { title: "<  Back", value: "back" },
     ]});
     if (a === "back") return;
@@ -4044,6 +4338,15 @@ async function walletSettings() {
       }
       if (a === "anim") { s.animations = s.animations === false; save();
         console.log(c.ok(`✓ launch animation ${s.animations ? "on" : "off"}`)); }
+      if (a === "animmode") {
+        const { v } = await P({ type: "select", name: "v", message: "Splash length:", choices: [
+          { title: "Short  (45 frames, ~1.5 s)", value: "short" },
+          { title: "Normal (72 frames, ~2.4 s)", value: "normal" },
+          { title: "Full   (235 frames, ~4.3 s)", value: "full" },
+        ]});
+        s.animMode = v; save(); console.log(c.ok(`✓ splash ${v}`));
+      }
+      if (a === "preview") { await bootAnimation(true); }
       if (a === "theme") {
         const { v } = await P({ type: "select", name: "v", message: "Theme:", choices: [
           { title: "Auto (detect background)", value: "auto" },
@@ -4954,6 +5257,7 @@ Security & privacy
 Flags: --yes · --all · --random · --delay <s> · --words 24 · --seed
        --token <SYM> · --file <path> · --keystore <file>
        --broadcast private|rpc · --coincontrol · --theme light|dark
+       --anim short|normal|full · --no-anim
        --no-vpn · --no-proxy
 Scripting: RAVENNE_PASS=<password> (also RAVENNE_KEYPASS for keystores).
 
@@ -4991,7 +5295,7 @@ const ROUTES = {
 };
 
 function parseArgs(argv) {
-  const flags = { yes: false, all: false, random: false, delay: 0, words: 12, seed: false, token: null, file: null, keystore: null, keepKey: false, profile: null, noProxy: false, broadcast: null, coincontrol: false, theme: null };
+  const flags = { yes: false, all: false, random: false, delay: 0, words: 12, seed: false, token: null, file: null, keystore: null, keepKey: false, profile: null, noProxy: false, broadcast: null, coincontrol: false, theme: null, noAnim: false, anim: null };
   const args = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -5001,6 +5305,12 @@ function parseArgs(argv) {
     else if (a === "--seed") flags.seed = true;
     else if (a === "--keep-key") flags.keepKey = true;
     else if (a === "--coincontrol") flags.coincontrol = true;
+    else if (a === "--no-anim") flags.noAnim = true;
+    else if (a === "--anim") {
+      const v = String(argv[++i] || "").toLowerCase();
+      if (["short", "normal", "full"].includes(v)) flags.anim = v;
+      else console.log(c.warn("--anim expects short|normal|full"));
+    }
     else if (a === "--theme") {
       const v = String(argv[++i] || "").toLowerCase();
       if (v === "light" || v === "dark") flags.theme = v;
@@ -5051,6 +5361,7 @@ async function main() {
     await ensureVPN();
     if (TTY && !state.autoYes && !state.flags.profile) await pickProfile();
     await purgeExpired();
+    await bootAnimation();
     return advancedMenu();
   }
   if (["help", "-h", "--help"].includes(args[0])) { console.log(HELP); return; }
@@ -5070,7 +5381,7 @@ async function main() {
 }
 
 /* Test hooks (pure helpers only — no wallet state required). */
-export const _internals = { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, utxoKey, liveUtxos, atomicWriteFile, readJsonResilient, isLightRgb, menuLayout };
+export const _internals = { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, utxoKey, liveUtxos, atomicWriteFile, readJsonResilient, isLightRgb, menuLayout, menuRow, ghostData, ghostScale, ghostPaint, ghostLayout, bootScreen };
 
 /* Direct execution — including bundled .cjs and pkg .exe forms. */
 const isMain = (() => {

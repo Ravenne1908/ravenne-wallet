@@ -1,0 +1,29 @@
+{
+  "_comment": "GhosttyFetch pour Windows — édition 'noir et blanc brillant'.",
+  "_animation_note": "animation.json = logo ASCII detaille (41 lignes) ; ansi.json = variante compacte en blocs (21 lignes).",
+  "animation_file": "animation.json",
+  "fps": 30.0,
+  "_color_note": "Couleur des caracteres 'brand' (contours du logo) : hex #rrggbb, ANSI brut comme 38;5;45, ou off/0/false/none pour desactiver.",
+  "color": "#ffffff",
+  "white_gradient_colors": [
+    "#e8e8e8",
+    "#d9d9d9",
+    "#c9c9c9",
+    "#b9b9b9",
+    "#a9a9a9",
+    "#999999",
+    "#898989",
+    "#7a7a7a",
+    "#6a6a6a",
+    "#5b5b5b"
+  ],
+  "_gradient_note": "Degrade applique au remplissage du logo, du haut vers le bas. Liste vide pour desactiver.",
+  "white_gradient_scroll": true,
+  "white_gradient_scroll_speed": 10,
+  "_layout_note": "center : centre le logo horizontalement ; cycles : 0 = boucle infinie, N = nombre de passages ; sync_output : rendu sans scintillement (Windows Terminal).",
+  "center": true,
+  "cycles": 0,
+  "sync_output": true,
+  "force_color": false,
+  "no_color": false
+}

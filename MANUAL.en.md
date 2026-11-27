@@ -1,6 +1,6 @@
 # Ravenne Wallet — User Manual (English)
 
-Version 9.10.0 · Windows · Node.js 18+ · MIT license
+Version 9.11.0 · Windows · Node.js 18+ · MIT license
 
 Ravenne is a **100% local, 100% terminal** crypto wallet. No account, no
 server, no telemetry, **no activation**. All keys stay on your machine,
@@ -71,6 +71,23 @@ There is **one entry point**: `ravenne.js` (or the exe). Nothing else to run.
      (keys derived in memory).
 
 No activation code, no webhook, no outbound call to start.
+
+### Splash and interface
+
+On launch, Ravenne plays a monochrome **ghost splash** (235 frames,
+GhosttyFetch, MIT) sized to the window, with a progress bar. Any key skips it.
+
+- `Settings → Wallet & display`:
+  - **Launch animation** — on/off
+  - **Splash length** — short (~1.5 s), normal (~2.4 s), full (~4.3 s)
+  - **Preview the splash** — play it once without restarting
+  - **Theme** — auto (OSC 11 detection), light, dark
+- CLI: `--anim short|normal|full`, `--no-anim`; `RAVENNE_NO_ANIM=1` also works.
+- The splash and the menus only set **foreground** colors: a Windows Terminal
+  background image stays visible. On a light background the palette switches
+  to dark grays; force it with `--theme light` if detection is wrong.
+- The menu is centered, scrolls with `↑ n more / ↓ n more`, re-centers when
+  the window is resized, and `esc` goes back.
 
 ---
 
@@ -280,6 +297,9 @@ usbrestore <folder>
 --keystore <f>  keystore for tx-sign
 --broadcast private|rpc
 --profile <name>
+--theme light|dark           force the palette (default: detect)
+--anim short|normal|full     splash length
+--no-anim                    skip the splash
 --no-vpn · --no-proxy        bypass a guard (not recommended)
 ```
 
@@ -451,7 +471,7 @@ exclusions.
 ## 12. Tests, build, license
 
 ```powershell
-npm test       # node:test — 17 tests
+npm test       # node:test — 22 tests
 .\build.bat    # exe + zip
 ```
 

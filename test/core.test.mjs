@@ -13,7 +13,7 @@ import {
   btcAddressFromPhrase, btcChangeFromPhrase, buildBtcTx, mergeChainTx,
 } from "../ravenne.js";
 
-const { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, liveUtxos, atomicWriteFile, readJsonResilient, isLightRgb, menuLayout } = _internals;
+const { fmtUnits, fmtBtc, fmtXmr, parseXmr, parseDuration, totpCode, b32encode, b32decode, liveUtxos, atomicWriteFile, readJsonResilient, isLightRgb, menuLayout, menuRow, ghostData, ghostScale, ghostPaint, ghostLayout, bootScreen } = _internals;
 
 const tmp = () => path.join(os.tmpdir(), `ravenne-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
 
@@ -186,12 +186,78 @@ test("menu layout fits any terminal size", () => {
   const choices = Array.from({ length: 20 }, (_, i) => ({ title: `Item ${i}`, description: "description" }));
   const strip = s => s.replace(/\x1b\[[0-9;]*m/g, "");
   for (const [cols, rows] of [[120, 40], [80, 30], [60, 24], [44, 20], [40, 14]]) {
-    const lay = menuLayout({ message: "What do you want to do?", choices, header: ["wallet · chain", "main 0 ETH"], idx: 12, cols, rows });
-    const width = Math.min(76, cols - 4) + 2;
-    for (const line of lay.lines) assert.equal(strip(line).length, width, `width at ${cols}x${rows}`);
-    assert.ok(lay.lines.length + 2 <= rows, `height at ${cols}x${rows}`);
-    assert.ok(lay.left >= 0 && lay.top >= 0);
-    assert.ok(lay.visible >= 1 && lay.visible <= choices.length);
+    for (const hint of ["", "v9.11.0"]) {
+      const lay = menuLayout({ message: "What do you want to do?", choices, header: ["wallet · chain", "main 0 ETH"], idx: 12, cols, rows, hint });
+      const width = Math.min(76, cols - 4) + 2;
+      for (const line of lay.lines) assert.equal(strip(line).length, width, `width at ${cols}x${rows} hint=${hint}`);
+      assert.ok(lay.lines.length + 2 <= rows, `height at ${cols}x${rows}`);
+      assert.ok(lay.left >= 0 && lay.top >= 0);
+      assert.ok(lay.visible >= 1 && lay.visible <= choices.length);
+    }
+  }
+});
+
+test("menu rows align icons in their own column", () => {
+  assert.deepEqual(menuRow("↓  Receive — new addresses"), { icon: "↓", label: "Receive — new addresses" });
+  assert.deepEqual(menuRow("R  Refresh"), { icon: "R", label: "Refresh" });
+  assert.deepEqual(menuRow("  Manage (list / rename / delete)"), { icon: " ", label: "Manage (list / rename / delete)" });
+  assert.deepEqual(menuRow("Back"), { icon: " ", label: "Back" });
+});
+
+test("ghost animation decodes and scales to any size", () => {
+  const g = ghostData();
+  assert.equal(g.w, 100);
+  assert.equal(g.h, 41);
+  assert.equal(g.raw.length, 235);
+  for (const f of g.raw) assert.equal(f.split("\n").length, 41);
+
+  const scaled = ghostScale(g.raw[0], g.w, g.h, 50, 21);
+  assert.equal(scaled.length, 21);
+  for (const row of scaled) {
+    assert.equal(row.text.length, 50);
+    assert.equal(row.mask.length, 50);
+    assert.match(row.text, /^[^\x00-\x1f]+$/);   // printable ASCII art (· is the only non-ASCII glyph)
+  }
+});
+
+test("ghost splash paints foreground only and never a background", () => {
+  const g = ghostData();
+  const frame = ghostScale(g.raw[0], g.w, g.h, 60, 25);
+  const lines = ghostPaint(frame, { scroll: 4, fade: 1 });
+  assert.equal(lines.length, 25);
+  for (const line of lines) {
+    assert.ok(!line.includes("\x1b[4"), "no background SGR");
+    assert.ok(!line.includes("48;"), "no 256-color background");
+  }
+  const dim = ghostPaint(frame, { scroll: 0, fade: 0.2 });
+  assert.equal(dim.length, 25);
+});
+
+test("ghost layout keeps the splash inside the window", () => {
+  for (const [cols, rows] of [[140, 45], [120, 40], [100, 30], [80, 24], [60, 20]]) {
+    const lay = ghostLayout(cols, rows, 100, 41);
+    assert.ok(lay, `layout at ${cols}x${rows}`);
+    assert.ok(lay.w <= cols - 4, `width at ${cols}x${rows}`);
+    assert.ok(lay.h + 6 <= rows, `height at ${cols}x${rows}`);
+    assert.ok(Math.abs(lay.w / lay.h - 100 / 41) < 0.15, `aspect at ${cols}x${rows}`);
+    assert.ok(lay.top >= 0);
+  }
+  assert.equal(ghostLayout(40, 14, 100, 41), null);
+});
+
+test("boot screen stays inside the window at any size", () => {
+  const g = ghostData();
+  const strip = s => s.replace(/\x1b\[[0-9;]*m/g, "");
+  for (const [cols, rows] of [[140, 45], [120, 40], [100, 30], [80, 24], [60, 20], [40, 14]]) {
+    const lay = ghostLayout(cols, rows, g.w, g.h);
+    const frame = lay ? ghostScale(g.raw[120], g.w, g.h, lay.w, lay.h) : null;
+    const lines = bootScreen({ cols, rows, lay, frame, progress: 0.5, fade: 1, final: false, status: "x" });
+    assert.ok(lines.length <= rows, `height at ${cols}x${rows}`);
+    for (const line of lines) assert.ok(strip(line).length <= cols, `width at ${cols}x${rows}: ${strip(line).length}`);
+    const final = bootScreen({ cols, rows, lay, frame, progress: 1, fade: 1, final: true,
+      status: "default · Ethereum · proxy on · Windows Terminal · dark" });
+    assert.ok(final.length <= rows);
+    for (const line of final) assert.ok(strip(line).length <= cols);
   }
 });
 

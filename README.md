@@ -7,7 +7,7 @@ Monero — no account, no server, no telemetry, no activation.
 > Open source (MIT). No webhook, no phone-home, no analytics. Everything runs
 > on your machine, encrypted with your master password.
 >
-> Clean terminal UI: a **centered menu** with icons, a **boot animation**,
+> Clean terminal UI: a **centered menu** with icons, a **ghost boot splash**,
 > automatic **light/dark theme detection** (works over a Windows Terminal
 > background image), English only, monochrome with green/yellow status colors.
 
@@ -57,6 +57,20 @@ Standalone executable (no Node needed):
 
 No activation code, no webhook, no outbound call to start.
 
+## Interface
+
+- **Ghost splash** — a monochrome, 235-frame animation (GhosttyFetch, MIT),
+  scaled to the window, with a progress bar. Any key skips it.
+  `Settings → Wallet & display` controls it: on/off, short/normal/full,
+  or *Preview the splash*. CLI: `--anim short|normal|full`, `--no-anim`,
+  `RAVENNE_NO_ANIM=1`.
+- **Centered menu** — icons in their own column, scrolling with
+  `↑ n more / ↓ n more`, live re-centering on resize, `esc` to go back.
+- **Background image friendly** — Ravenne never paints a background: it asks
+  the terminal for its background color (OSC 11) and adapts the palette.
+  Force it with `--theme light|dark` or `Settings → Wallet & display → Theme`.
+- **Monochrome** — white/gray UI, green = OK, yellow = warning/error.
+
 ## Quick start
 
 ```powershell
@@ -102,9 +116,11 @@ Get-FileHash ravenne-wallet-vX.Y.Z.zip -Algorithm SHA256
 ## Tests
 
 ```powershell
-npm test
+npm test          # 22 tests: crypto, wallets, BTC tx, menus, splash geometry
+npm run ghost     # preview one splash frame in the terminal
 ```
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). The boot animation is third-party (MIT):
+see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
